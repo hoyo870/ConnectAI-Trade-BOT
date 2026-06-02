@@ -1,0 +1,75 @@
+# ── 데이터 파이프라인 ─────────────────────────────────────────────────────────
+data:
+  label_lookahead: 12        # 레이블 계산용 선행 봉 수 (12 * 5분 = 1시간)
+  long_threshold:  0.005     # Long 레이블 임계치 (+0.5%)
+  short_threshold: 0.005     # Short 레이블 임계치 (-0.5%)
+  context_atr_pct: 0.60      # ATR 상위 N% → Context=1
+  train_ratio:     0.70
+  val_ratio:       0.15
+  scaler_path:     "models/feature_scaler.pkl"
+
+# ── 딥러닝 전문가 모델 ────────────────────────────────────────────────────────
+dl:
+  seq_len:         60
+  hidden_dim:      128
+  num_heads:       4
+  num_tcn_layers:  4
+  dropout:         0.3
+  batch_size:      256
+  epochs:          50
+  lr:              0.001
+  patience:        7
+  model_dir:       "models"
+
+# ── 시그널 추출 ───────────────────────────────────────────────────────────────
+signal:
+  mask_threshold:  0.40      # Action Masking 임계값 (0.45→0.40)
+
+# ── RL 에이전트 ───────────────────────────────────────────────────────────────
+rl:
+  total_timesteps: 2000000
+  n_envs:          4
+  window_size:     2000
+  eval_freq:       50000
+  eval_episodes:   5
+  learning_rate:   0.0003
+  n_steps:         2048
+  batch_size:      256
+  n_epochs:        10
+  gamma:           0.99
+  gae_lambda:      0.95
+  clip_range:      0.2
+  ent_coef:        0.05
+  vf_coef:         0.5
+  max_grad_norm:   0.5
+  model_save_dir:  "models"
+  log_dir:         "logs/rl"
+
+# ── 트레이딩 환경 ─────────────────────────────────────────────────────────────
+env:
+  initial_capital: 10000.0
+  risk_ratio:      0.3       # 시드 투입 비율 (0.1~0.5 제한)
+  risk_ratio_min:  0.1
+  risk_ratio_max:  0.5
+  leverage:        1.5       # 레버리지 1.5x (보수적)
+  leverage_max:    5.0
+  stop_loss:       0.015     # 손절 1.5%
+  take_profit:     0.045     # 익절 4.5% (3:1 R:R)
+  trading_fee:     0.0005
+  slippage:        0.0002
+  drawdown_coeff:  2.0
+
+# ── 백테스트 ─────────────────────────────────────────────────────────────────
+backtest:
+  long_entry_thr:  0.65
+  short_entry_thr: 0.65
+  min_hold_bars:   12
+  stop_loss:       0.015
+  take_profit:     0.045
+  result_dir:      "logs/backtest"
+
+# ── 데이터 수집 ───────────────────────────────────────────────────────────────
+fetcher:
+  symbol:          "BTC/USDT"
+  timeframe:       "5m"
+  raw_dir:         "data/raw"

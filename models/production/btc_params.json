@@ -1,0 +1,31 @@
+{
+  "version": "v17",
+  "rr_scale": 1.15,
+  "rr_cap": 0.845,
+  "atr_filter_thr": null,
+  "tiers": [
+    [0.72, 10.0, 0.805],
+    [0.62,  4.0, 0.644],
+    [0.55,  3.5, 0.483],
+    [0.50,  2.5, 0.4025]
+  ],
+  "price_sl": 0.020,
+  "price_tp": 0.060,
+  "min_hold_bars": 120,
+  "max_dd_cb": 1.0,
+  "cooling_bars": 200,
+  "sig_upper_thr": 0.65,
+  "metrics_2026": {
+    "win_rate": 49.6,
+    "total_return": 180.7,
+    "trades_per_day": 1.85,
+    "mdd": null
+  },
+  "metrics_hist": {
+    "pos_cnt": "6/10",
+    "avg_win_rate": 45.9,
+    "avg_tpd": 2.04
+  },
+  "phase": "Phase 1 완료 (2026-05-31)",
+  "notes": "4티어(≥0.50) + rr×1.15 + sl=0.020 + ddcb=1.0. 창 패턴 ++---++-++"
+}

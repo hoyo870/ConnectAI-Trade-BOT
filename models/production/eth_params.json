@@ -1,0 +1,44 @@
+{
+  "version": "eth_hybrid_v1",
+  "strategy": "hybrid",
+  "symbol": "ETH/USDT",
+  "rr_scale": 0.90,
+  "rr_cap": 0.662,
+  "tiers": [
+    [0.72, 10.0, 0.630],
+    [0.62,  4.0, 0.504],
+    [0.55,  3.5, 0.378],
+    [0.50,  2.5, 0.315]
+  ],
+  "price_sl": 0.020,
+  "price_tp": 0.150,
+  "min_hold_bars": 60,
+  "max_dd_cb": 1.0,
+  "cooling_bars": 200,
+  "sig_upper_thr": 0.65,
+  "gate": {
+    "vol_mult": 0.8,
+    "rsi_long_hi": 60,
+    "rsi_short_lo": 30,
+    "use_1h": true,
+    "ema_span_short": 9,
+    "ema_span_long": 21,
+    "rsi_period": 14,
+    "vol_ema_span": 20,
+    "trend_ema_1h_span": 20
+  },
+  "signal_source": "models/production/eth_expert_*.pt",
+  "scaler": "models/production/eth_scaler.pkl",
+  "metrics_hist": {
+    "pos_cnt": "7/10",
+    "avg_win_rate": 46.6,
+    "avg_tpd": 2.53,
+    "pattern": "--++++-+++"
+  },
+  "metrics_2026": {
+    "total_return": 60.9,
+    "long_short_ratio": "96L/134S"
+  },
+  "phase": "Phase 2 완료 (2026-06-01)",
+  "notes": "ETH DL 신호(v2) + 규칙 게이트(MA9/21 + RSI50~60 + Vol0.8× + 1h추세). 하락장(-32%)에서 숏 비중 58%로 +60.9% 달성. 창[01][02](ETH ATH), 창[07](2024 BTC ETF 랠리) 구조적 실패."
+}
