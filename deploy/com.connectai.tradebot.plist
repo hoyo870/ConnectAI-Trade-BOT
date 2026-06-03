@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.connectai.tradebot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/Caskroom/miniforge/base/envs/cryptobot/bin/python</string>
+        <string>src/live_trader.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hwanghoyeon/Documents/connectai-trade-bot</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TRADE_MODE</key>
+        <string>paper</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hwanghoyeon/Documents/connectai-trade-bot/logs/paper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/hwanghoyeon/Documents/connectai-trade-bot/logs/paper.log</string>
+
+    <!-- 비정상 종료 시 자동 재시작 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

@@ -201,6 +201,28 @@ def send_trade_alert(text: str) -> bool:
         return False
 
 
+def poll_commands(token: str, chat_id: str, offset: int = 0) -> tuple[list, int]:
+    """getUpdates polling — 봇에 온 커맨드 목록과 다음 offset 반환."""
+    url = (f"https://api.telegram.org/bot{token}/getUpdates"
+           f"?offset={offset}&limit=20&timeout=0")
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return [], offset
+
+    commands = []
+    new_offset = offset
+    for update in data.get("result", []):
+        new_offset = max(new_offset, update.get("update_id", 0) + 1)
+        msg = update.get("message") or update.get("edited_message") or {}
+        if str(msg.get("chat", {}).get("id", "")) == str(chat_id):
+            text = msg.get("text", "").strip()
+            if text.startswith("/"):
+                commands.append(text.split()[0].lower())
+    return commands, new_offset
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def notify_once():

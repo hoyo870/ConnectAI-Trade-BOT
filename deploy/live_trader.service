@@ -1,0 +1,18 @@
+[Unit]
+Description=ConnectAI Trade Bot (Paper Mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/connectai-trade-bot
+ExecStart=/opt/miniconda3/envs/cryptobot/bin/python src/live_trader.py
+Environment=TRADE_MODE=paper
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/connectai-trade-bot/logs/paper.log
+StandardError=append:/opt/connectai-trade-bot/logs/paper.log
+
+[Install]
+WantedBy=multi-user.target

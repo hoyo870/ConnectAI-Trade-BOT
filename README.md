@@ -1,18 +1,29 @@
 # ConnectAI Trade Bot
 
 BTC/USDT · ETH/USDT 5분봉 암호화폐 선물 자동매매 봇.  
-TCN + Multi-Head Self-Attention 기반 Expert 모델로 롱/숏 진입 시그널을 생성하고, Bybit 선물에 자동 주문합니다.
+두 가지 독립 전략을 지원합니다: **DL v17** (TCN+Attention 신경망) / **Antifragile** (AdaptRSI + ATR trailing).
 
 ---
 
-## 성과 (2026년 백테스트 기준)
+## 성과 (2026 백테스트)
 
-| 코인 | 승률 | TPD | 일 평균 수익률 | MDD |
-|------|------|-----|-------------|-----|
-| BTC/USDT | 49.6% ✅ | 1.84 ✅ | +1.30% ✅ | 57.4% |
-| ETH/USDT | 48.3% ✅ | 1.16 | +1.11% ✅ | 28.8% |
+### Antifragile Trailing Stop (권장 · 2026-06-03 검증)
 
-> 판정 기준: 승률 ≥ 45% · TPD ≥ 1.5 · 일 평균 수익률 ≥ 1%
+| 코인 | 수익률 | TPD | MDD | PF | Top-5 제거 | hist 통과 |
+|------|-------|-----|-----|-----|----------|---------|
+| BTC | +226% | 8.30 ✅ | 3.1% | 8.45 | +127% ✅ | 9/10 |
+| ETH | +558% | 7.27 ✅ | 3.4% | 7.82 | +371% ✅ | 10/10 |
+
+> Top-5 제거 후에도 강력한 양수 수익 → outlier 독립적
+
+### DL v17 Instant (기존)
+
+| 코인 | 승률 | TPD | 수익률 | MDD |
+|------|------|-----|-------|-----|
+| BTC | 49.6% | 1.84 | +181% | 57.4% |
+| ETH | 48.3% | 1.16 | +165% | 28.8% |
+
+> BTC Top-5 제거 시 -18.9% (outlier 의존 주의)
 
 ---
 
@@ -21,76 +32,70 @@ TCN + Multi-Head Self-Attention 기반 Expert 모델로 롱/숏 진입 시그널
 ```
 OHLCV 5분봉
     │
-    ▼
-data_pipeline.py         ← 기술 지표 30+ 개 계산, 스케일링
+    ├─── [DL v17 경로]
+    │        │
+    │        ▼
+    │    data_pipeline.py    ← 기술 지표 30+개, 스케일링
+    │        │
+    │        ▼
+    │    expert_models.py    ← TCN(6 layers) + Multi-Head Attention
+    │        ├── Long Expert  → signal_long  (0~1)
+    │        ├── Short Expert → signal_short (0~1)
+    │        └── Context      → signal_context (0~1)
+    │        │
+    │        ▼
+    │    hybrid_engine.py    ← 4단계 Tier 레버리지(2.5x~10x) + CB
+    │
+    └─── [Antifragile 경로]
+             │
+             ▼
+         AdaptRSI            ← 1h EMA 방향별 RSI 임계값 동적 조정
+             │
+             ▼
+         ATR trailing stop   ← 고정 SL/TP 없음 · peak 추적
+             │
+             ▼
+         Pyramiding          ← 유리방향 +0.5ATR마다 포지션 추가
     │
     ▼
-expert_models.py         ← TCN (6 layers) + Multi-Head Attention
-    ├── Long Expert      → signal_long  (0~1)
-    ├── Short Expert     → signal_short (0~1)
-    └── Context Expert   → signal_context (0~1)
-    │
-    ▼
-hybrid_engine.py         ← v17 백테스트 / 진입-청산 엔진
-    ├── 4단계 Tier 레버리지 (0.48 ~ 0.72)
-    ├── Phase2_gate (ETH: EMA9/21 + RSI + vol_ratio + 1h trend)
-    └── Drawdown Circuit Breaker (max_dd_cb)
-    │
-    ▼
-live_trader.py           ← 실거래 루프 (5분봉마다 실행)
+live_trader.py               ← STRATEGY 환경변수로 경로 선택
 ```
-
-### 모델 파라미터
-
-| 항목 | BTC | ETH |
-|------|-----|-----|
-| HIDDEN_DIM | 128 | 256 |
-| NUM_TCN_LAYERS | 4 | 6 |
-| SEQ_LEN | 60봉 (5h) | 60봉 (5h) |
-| min_hold_bars | 120봉 (10h) | 180봉 (15h) |
 
 ---
 
 ## 설치
 
-### 1. 의존성 설치
-
 ```bash
 python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. 환경 변수 설정
-
-```bash
 cp .env.example .env
-# .env 파일을 열어 API 키와 Telegram 토큰 입력
+# .env: API 키, Telegram 토큰 입력
 ```
 
-### 3. 모델 파일 준비
-
-`models/production/` 디렉토리에 아래 파일이 있어야 합니다:
+`models/production/` 디렉토리에 모델 파일 필요 (`.pt` / `.pkl` — git 제외, 별도 수령):
 
 ```
 models/production/
-├── btc_expert_long.pt
-├── btc_expert_short.pt
-├── btc_expert_context.pt
-├── btc_scaler.pkl
-├── btc_params.json          ← 커밋 포함
-├── eth_expert_long.pt
-├── eth_expert_short.pt
-├── eth_expert_context.pt
-├── eth_scaler.pkl
-└── eth_params.json          ← 커밋 포함
+├── btc_expert_long.pt    btc_expert_short.pt    btc_expert_context.pt
+├── btc_scaler.pkl        btc_params.json
+├── eth_expert_long.pt    eth_expert_short.pt    eth_expert_context.pt
+├── eth_scaler.pkl        eth_params.json
 ```
-
-> `.pt` / `.pkl` 파일은 용량 문제로 git에서 제외됩니다. 별도 스토리지에서 수령하거나 직접 학습해 주세요.
 
 ---
 
 ## 실행
+
+### 전략 선택
+
+`.env` 파일에 전략을 설정합니다:
+
+```bash
+STRATEGY=antifragile   # Antifragile Trailing Stop (권장)
+# STRATEGY=dl_v17      # DL v17 Instant (기존 기본값)
+```
 
 ### 라이브 트레이더
 
@@ -100,40 +105,28 @@ python src/live_trader.py
 
 # 백그라운드 (권장)
 nohup python src/live_trader.py > logs/live.log 2>&1 &
+
+# 또는 deploy 스크립트 사용
+bash deploy/run_paper.sh
 ```
 
-`TRADE_MODE` 환경 변수로 모드를 제어합니다:
-- `paper` — 실시세 조회, 가상 주문만 (기본값, 테스트용)
-- `sandbox` — Bybit 테스트넷 실제 주문
-- `real` — 실계좌 주문 (주의!)
+`TRADE_MODE`:
+- `paper` — 실시세 조회, 가상 주문 (기본값 · 테스트용)
+- `sandbox` — Bybit 테스트넷
+- `real` — 실계좌 (**주의!**)
 
-### 백테스트 CLI
+### 백테스트
 
 ```bash
-# 2026년 기본 백테스트
+# Antifragile 전략
+python scripts/backtest_antifragile.py --coin btc --mode 2026
+python scripts/backtest_antifragile.py --coin eth --mode 2026
+python scripts/backtest_antifragile.py --coin both --mode random --seed 42
+
+# DL v17 전략
 python scripts/backtest.py --coin both --mode 2026
-
-# 히스토리 랜덤 10회
 python scripts/backtest.py --coin both --mode random --windows 10 --seed 42
-
-# ETH Pullback 전략 테스트
-python scripts/backtest.py --coin eth --mode 2026 --strategy pullback
-
-# 특정 구간
-python scripts/backtest.py --coin btc --mode custom --start 2024-01-01 --end 2024-04-01
 ```
-
-**파라미터:**
-
-| 옵션 | 값 | 설명 |
-|------|----|------|
-| `--coin` | `btc` \| `eth` \| `both` | 대상 코인 |
-| `--mode` | `2026` \| `random` \| `custom` | 백테스트 구간 |
-| `--strategy` | `instant` \| `pullback` | 진입 전략 |
-| `--windows` | int | 랜덤 구간 수 (기본 10) |
-| `--seed` | int | 랜덤 시드 (기본 42) |
-| `--start` | `YYYY-MM-DD` | custom 시작일 |
-| `--end` | `YYYY-MM-DD` | custom 종료일 |
 
 ---
 
@@ -141,70 +134,57 @@ python scripts/backtest.py --coin btc --mode custom --start 2024-01-01 --end 202
 
 ```
 connectai-trade-bot/
-├── src/                        # 핵심 라이브러리
-│   ├── data_pipeline.py        # 지표 계산, 스케일러
-│   ├── expert_models.py        # TCN+Attention 모델 아키텍처
-│   ├── hybrid_engine.py        # 백테스트 엔진 + compute_metrics
+├── src/
+│   ├── live_trader.py          # 실거래 루프 (STRATEGY 분기)
+│   ├── data_pipeline.py        # 지표 계산, 스케일링
+│   ├── expert_models.py        # TCN+Attention 모델
+│   ├── hybrid_engine.py        # DL v17 백테스트 엔진
 │   ├── signal_extractor.py     # 배치 시그널 추출
-│   ├── live_trader.py          # 실거래 루프 (5분봉)
-│   ├── exchange_client.py      # Bybit API 클라이언트
+│   ├── exchange_client.py      # Bybit API
 │   ├── telegram_notifier.py    # 텔레그램 알림
-│   ├── data_fetcher.py         # OHLCV 원시 데이터 수집
-│   └── rl/                     # RL 보류 (미사용)
+│   ├── data_fetcher.py         # OHLCV 수집
+│   └── rl/                     # RL (보류)
 │
 ├── scripts/
-│   └── backtest.py             # CLI 백테스트
+│   ├── backtest_antifragile.py # Antifragile 전략 백테스트 (승격됨)
+│   ├── backtest.py             # DL v17 백테스트 CLI
+│   ├── analyze_funding.py      # BTC 펀딩비 분석
+│   ├── analyze_funding_eth.py  # ETH 펀딩비 분석
+│   └── analyze_top_trades.py   # outlier 의존도 분석
 │
-├── models/
-│   └── production/
-│       ├── btc_params.json     # BTC 프로덕션 파라미터
-│       └── eth_params.json     # ETH 프로덕션 파라미터
+├── temp/scripts/               # 연구용 실험 스크립트 (참고용)
 │
+├── models/production/          # 프로덕션 모델 파일
+├── deploy/                     # 배포 설정 (systemd, launchd, nohup)
 ├── data/                       # OHLCV 데이터 (git 제외)
 ├── logs/                       # 런타임 로그 (git 제외)
 │
-├── config.yaml                 # 모델/RL 학습 설정
-├── requirements.txt
-├── .env.example                # 환경 변수 템플릿
-├── SCRIPTS.md                  # 스크립트 사용법
-├── MODEL_HISTORY.md            # 모델 이력
-└── TODO.md                     # 연구 과제
+├── STRATEGY_ANTIFRAGILE.md     # Antifragile 전략 규칙
+├── MODEL_HISTORY.md            # DL 모델 이력
+├── SCRIPTS.md                  # 스크립트 사용 가이드
+├── TODO_SCHEDULE.md            # 연구 스케줄
+└── TODO.md                     # 미결 이슈
 ```
-
----
-
-## 진입 전략
-
-### Instant (기본)
-시그널이 tier 기준 초과 시 즉시 진입. BTC에 적합.
-
-### Pullback
-이전 봉이 tier 기준 충족 후, 현재 봉 시그널이 감소할 때 진입. 피크-후-풀백 패턴.  
-ETH 히스토리 기준 WR +2.3%p, daily +0.20%p, MDD -5.5%p 개선 확인 (연구 중).
-
-### Tier 구조 (4단계 레버리지)
-
-| 시그널 임계값 | 레버리지 | RR |
-|---|---|---|
-| ≥ 0.72 | 10x | 0.50 |
-| ≥ 0.62 | 4x | 0.40 |
-| ≥ 0.55 | 3.5x | 0.30 |
-| ≥ 0.48 | 2.5x | 0.25 |
 
 ---
 
 ## 알림
 
-텔레그램으로 아래 이벤트를 실시간 알림합니다:
-- 포지션 진입 / 청산
-- 서킷 브레이커 발동
+텔레그램으로 실시간 알림:
+- 포지션 진입 / 청산 (trailing SL 도달 포함)
+- 피라미딩 추가 신호 (Antifragile)
+- 서킷 브레이커 · 일일 손실 한도
 - 1시간 주기 상태 보고
-- 오류 발생
+
+```bash
+/stop   # 텔레그램에서 봇 긴급 정지 (포지션 청산 후 종료)
+```
 
 ---
 
 ## 주의사항
 
-- `TRADE_MODE=real` 설정 전 반드시 `sandbox` 또는 `paper`로 충분히 검증하세요.
-- 모든 백테스트 결과는 과거 성과이며 미래 수익을 보장하지 않습니다.
-- 레버리지 선물 거래는 원금 손실 위험이 있습니다.
+- `TRADE_MODE=real` 전 반드시 paper 모드로 충분히 검증
+- 전략 전환(`STRATEGY` 변경) 시 포지션 없는 상태에서 재시작
+- 모든 백테스트 결과는 과거 성과이며 미래 수익을 보장하지 않음
+- 레버리지 선물 거래는 원금 손실 위험이 있음

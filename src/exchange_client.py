@@ -71,10 +71,18 @@ def get_position(exchange: ccxt.bybit) -> dict:
                 "side":         pos["side"],          # "long" | "short"
                 "size":         contracts,
                 "entry_price":  float(pos.get("entryPrice") or 0),
+                "mark_price":   float(pos.get("markPrice") or 0),
                 "leverage":     float(pos.get("leverage") or 1),
                 "unrealized_pnl": float(pos.get("unrealizedPnl") or 0),
             }
-    return {"side": None, "size": 0.0, "entry_price": 0.0, "leverage": 1.0, "unrealized_pnl": 0.0}
+    return {
+        "side": None,
+        "size": 0.0,
+        "entry_price": 0.0,
+        "mark_price": 0.0,
+        "leverage": 1.0,
+        "unrealized_pnl": 0.0,
+    }
 
 
 def set_leverage(exchange: ccxt.bybit, leverage: int):
