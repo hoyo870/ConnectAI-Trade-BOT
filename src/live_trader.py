@@ -5,6 +5,10 @@ TRADE_MODE 옵션 (.env):
   sandbox : 테스트넷 주문 실행
   paper   : 실시세 조회 + 가상 주문 시뮬레이션 (주문 없음, CSV 저장)
 
+STRATEGY 옵션 (.env):
+  dl_v17      : TCN+Attention DL 모델 (단일 코인, COIN 환경변수)
+  antifragile : AdaptRSI + ATR trailing stop (4종목 자동 25%씩 분할)
+
 실행:
   python src/live_trader.py
   nohup python src/live_trader.py > logs/live.log 2>&1 &
@@ -51,11 +55,15 @@ PAPER_CSV_HEADER = [
 # ── 로깅 설정 ──────────────────────────────────────────────────────────────────
 log = logging.getLogger(__name__)
 
-BARS_PER_DAY   = 288
-FETCH_LIMIT    = 600    # 신호 롤링(100) + 지표 워밍(200) + 여유
-SIG_ROLL_WIN   = 100
-INITIAL_CAPITAL = 10_000.0
-STOP_POLL_INTERVAL = 2.0
+BARS_PER_DAY        = 288
+FETCH_LIMIT         = 600    # 신호 롤링(100) + 지표 워밍(200) + 여유
+SIG_ROLL_WIN        = 100
+INITIAL_CAPITAL     = 10_000.0
+STOP_POLL_INTERVAL  = 2.0
+
+# ── 멀티코인 (Antifragile 전용) ────────────────────────────────────────────────
+COINS_MULTI      = ["BTC", "ETH", "SOL", "XRP"]
+MULTI_COIN_ALLOC = 0.25   # 4종목 균등 배분 (25% each → 2,500 USDT)
 
 def MIN_QTY():
     return get_min_qty()  # COIN 환경변수 기준 동적 최소 수량
@@ -116,7 +124,7 @@ DEFAULT_STATE = {
     "sig_long_hist":   [],
     "sig_short_hist":  [],
     "trade_log":       [],
-    # ── Antifragile Trailing Stop 전용 상태 ──────────────────────────────────
+    # ── Antifragile Trailing Stop 전용 상태 ──────────────────────────────
     "af_trail_sl":       0.0,   # 현재 trailing stop 가격
     "af_peak_price":     0.0,   # 진입 후 최고(롱)/최저(숏) 가격
     "af_pyramid_count":  0,     # 피라미딩 추가 횟수
@@ -125,7 +133,7 @@ DEFAULT_STATE = {
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
-# scripts/backtest_antifragile.py 검증: BTC hist 9/10 +212%/3개월, ETH hist 10/10 +326%/3개월
+# 검증: BTC 9/10 +212%/3개월, ETH 10/10 +326%, SOL 10/10 +1572%, XRP 10/10 +4213%
 AF_PARAMS = {
     "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
     "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
@@ -150,16 +158,16 @@ def fresh_state() -> dict:
 
 def get_runtime_paths(paper_mode: bool) -> dict:
     coin = os.environ.get("COIN", "BTC").lower()
-    prefix = f"_{coin}" if coin != "btc" else ""  # BTC는 기존 파일명 유지 (하위 호환)
+    prefix = f"_{coin}" if coin != "btc" else ""  # BTC는 기존 파일명 유지
     if paper_mode:
         return {
-            "state_file":     ROOT / f"logs/paper_state{prefix}.json",
-            "log_file":       ROOT / f"logs/paper{prefix}.log",
+            "state_file":      ROOT / f"logs/paper_state{prefix}.json",
+            "log_file":        ROOT / f"logs/paper{prefix}.log",
             "paper_trade_csv": ROOT / f"logs/paper_trades{prefix}.csv",
         }
     return {
-        "state_file": ROOT / f"logs/live_state{prefix}.json",
-        "log_file":   ROOT / f"logs/live{prefix}.log",
+        "state_file":      ROOT / f"logs/live_state{prefix}.json",
+        "log_file":        ROOT / f"logs/live{prefix}.log",
         "paper_trade_csv": None,
     }
 
@@ -259,8 +267,8 @@ def _compute_af_indicators(df: pd.DataFrame) -> tuple:
 
     # 1h EMA20 추세 (마지막 1h 봉 기준)
     try:
-        cl1h    = close.resample("1h").last().ffill()
-        ema_1h  = cl1h.ewm(span=20, adjust=False).mean()
+        cl1h   = close.resample("1h").last().ffill()
+        ema_1h = cl1h.ewm(span=20, adjust=False).mean()
         trend_up   = bool(cl1h.iloc[-1] > ema_1h.iloc[-1])
         trend_down = bool(cl1h.iloc[-1] < ema_1h.iloc[-1])
     except Exception:
@@ -274,6 +282,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     now_str: str, paper_mode: bool,
                     paper_trade_csv: Optional[Path]) -> dict:
     """Antifragile Trailing Stop 전략: AdaptRSI 진입 + ATR trailing stop + 피라미딩"""
+    coin = os.environ.get("COIN", "BTC").upper()
     TRADING_FEE = 0.0005 + 0.0002
 
     atr, rsi, trend_up, trend_down = _compute_af_indicators(df)
@@ -286,7 +295,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
     # ── AF 상태 안전 초기화 (구버전 state 로드 또는 첫 실행 시) ───────────────────
     if pos != 0 and not state.get("af_trail_sl"):
-        log.warning("[AF] AF 상태 없음 → 현재가 기준 trail_sl 재초기화")
+        log.warning(f"[{coin}/AF] AF 상태 없음 → 현재가 기준 trail_sl 재초기화")
         state["af_peak_price"]    = price
         state["af_current_rr"]    = state.get("entry_rr", p["rr_base"])
         state["af_pyramid_count"] = 0
@@ -306,9 +315,10 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
             reason = "trail_SL" if hit_stop else "timeout"
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
+            pnl_approx = pos * (price - state.get("entry_price", price)) / (state.get("entry_price", price) + 1e-9) * lev * state.get("af_current_rr", 0)
             send_trade_alert(
-                f"📤 <b>[AF] 청산</b> [{reason}]\n"
-                f"가격: {price:,.2f} | PnL: {(pos*(price-state.get('entry_price',price))/(state.get('entry_price',price)+1e-9)*lev*state.get('af_current_rr',0)):+.2%}\n"
+                f"📤 <b>[{coin}/AF] 청산</b> [{reason}]\n"
+                f"가격: {price:,.4f} | PnL: {pnl_approx:+.2%}\n"
                 f"자본: {state['capital']:,.0f} USDT"
             )
         else:
@@ -330,16 +340,15 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
             if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl:
                 state["af_pyramid_count"] += 1
                 state["af_current_rr"]    += p["rr_add"]
-                state["entry_rr"]          = state["af_current_rr"]  # _close_and_log 호환
-                # trailing stop tight으로 조정
+                state["entry_rr"]          = state["af_current_rr"]
                 if pos == 1:
                     state["af_trail_sl"] = max(state["af_trail_sl"], price - p["trail_atr_tight"] * atr)
                 else:
                     state["af_trail_sl"] = min(state["af_trail_sl"], price + p["trail_atr_tight"] * atr)
 
-                log.info(f"[AF 피라미딩 #{state['af_pyramid_count']}] "
+                log.info(f"[{coin}/AF 피라미딩 #{state['af_pyramid_count']}] "
                          f"favorable={favorable:.2f}ATR | rr={state['af_current_rr']:.2f} | "
-                         f"trail_sl={state['af_trail_sl']:,.2f}")
+                         f"trail_sl={state['af_trail_sl']:,.4f}")
 
                 if not paper_mode:
                     try:
@@ -348,11 +357,11 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                             side = "buy" if pos == 1 else "sell"
                             place_market_order(exchange, side, add_qty)
                             send_trade_alert(
-                                f"➕ <b>[AF] 피라미딩 #{state['af_pyramid_count']}</b>\n"
-                                f"가격: {price:,.2f} | 추가수량: {add_qty}"
+                                f"➕ <b>[{coin}/AF] 피라미딩 #{state['af_pyramid_count']}</b>\n"
+                                f"가격: {price:,.4f} | 추가수량: {add_qty}"
                             )
                     except Exception as e:
-                        log.error(f"[AF] 피라미딩 주문 실패: {e}")
+                        log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
 
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
@@ -361,7 +370,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
         direction = 1 if long_ok else (-1 if short_ok else 0)
         if direction != 0:
-            dir_str   = "LONG 🟢" if direction == 1 else "SHORT 🔴"
+            dir_str    = "LONG 🟢" if direction == 1 else "SHORT 🔴"
+            trend_str  = "DN" if trend_down else ("UP" if trend_up else "RG")
             init_trail = (price - p["trail_atr_init"] * atr) if direction == 1 else \
                          (price + p["trail_atr_init"] * atr)
 
@@ -371,7 +381,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
             state["entry_lev"]         = lev
             state["entry_rr"]          = p["rr_base"]
             state["entry_bar"]         = state["current_bar"]
-            state["entry_sig_long"]    = rsi   # RSI를 sig 대신 기록
+            state["entry_sig_long"]    = rsi
             state["entry_sig_short"]   = atr
             state["af_trail_sl"]       = init_trail
             state["af_peak_price"]     = price
@@ -379,13 +389,13 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
             state["af_current_rr"]     = p["rr_base"]
             state["af_entry_atr"]      = atr
 
-            log.info(f"[AF {'PAPER ' if paper_mode else ''}진입] {dir_str} | "
-                     f"가격={price:,.2f} | RSI={rsi:.1f}({'DN' if trend_down else 'UP' if trend_up else 'RG'}) | "
-                     f"ATR={atr:.2f} | trail_sl={init_trail:,.2f}")
+            log.info(f"[{coin}/AF {'PAPER ' if paper_mode else ''}진입] {dir_str} | "
+                     f"가격={price:,.4f} | RSI={rsi:.1f}({trend_str}) | "
+                     f"ATR={atr:.4f} | trail_sl={init_trail:,.4f}")
             send_trade_alert(
-                f"📥 <b>{'[PAPER] ' if paper_mode else ''}[AF] 진입</b> {dir_str}\n"
-                f"가격: {price:,.2f} | RSI: {rsi:.1f} | ATR: {atr:.2f}\n"
-                f"trail_SL: {init_trail:,.2f} | 자본: {state['capital']:,.0f} USDT"
+                f"📥 <b>{'[PAPER] ' if paper_mode else ''}[{coin}/AF] 진입</b> {dir_str}\n"
+                f"가격: {price:,.4f} | RSI: {rsi:.1f}({trend_str}) | ATR: {atr:.4f}\n"
+                f"trail_SL: {init_trail:,.4f} | 자본: {state['capital']:,.0f} USDT"
             )
 
             if not paper_mode:
@@ -393,30 +403,72 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     set_leverage(exchange, lev)
                     qty = calc_qty(state["capital"], p["rr_base"], lev, price)
                     if qty < MIN_QTY():
-                        log.warning(f"[AF] 최소수량 미달: {qty:.4f} — 진입 취소")
+                        log.warning(f"[{coin}/AF] 최소수량 미달: {qty} — 진입 취소")
                         state["position"] = 0
                     else:
                         side = "buy" if direction == 1 else "sell"
                         place_market_order(exchange, side, qty)
                 except Exception as e:
-                    log.error(f"[AF] 진입 주문 실패: {e}")
+                    log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
                     state["position"] = 0
 
     return state
 
 
-# ── 메인 루프 한 틱 처리 ──────────────────────────────────────────────────────
+# ── 멀티코인 AF 전용: 단일 코인 틱 처리 ───────────────────────────────────────
+def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
+                      paper_trade_csv: Optional[Path]) -> dict:
+    """4종목 멀티코인 모드 — 코인별 OHLCV fetch → 중복 방지 → process_tick_af 호출."""
+    os.environ["COIN"] = coin
+
+    try:
+        df = fetch_ohlcv_df(exchange, limit=FETCH_LIMIT)
+    except Exception as e:
+        log.error(f"[{coin}] OHLCV 조회 실패: {e}")
+        return state
+
+    if len(df) < SIG_ROLL_WIN + 10:
+        return state
+
+    row = df.iloc[-1]
+    candle_ts = str(row.name)
+    if state.get("last_candle_ts") == candle_ts:
+        return state
+    state["last_candle_ts"] = candle_ts
+
+    price = float(row["close"])
+    state["last_price"] = price
+    state["current_bar"] += 1
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # 일일 손실 한도 리셋 (2%)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if state.get("daily_date") != today:
+        state["daily_start_capital"] = state["capital"]
+        state["daily_date"]  = today
+        state["daily_halt"]  = False
+        log.info(f"[{coin} 일일리셋] 시작자본={state['capital']:.0f} USDT")
+
+    if state.get("daily_halt"):
+        return state
+
+    daily_start    = state.get("daily_start_capital", state["capital"])
+    daily_loss_pct = (state["capital"] - daily_start) / (daily_start + 1e-9)
+    if daily_loss_pct <= -0.02:
+        log.warning(f"[{coin}] 일일 손실 한도 {daily_loss_pct:.2%} → 금일 거래 중단")
+        if state["position"] != 0:
+            _close_and_log(exchange, state, price, now_str, forced=True, reason="일일한도",
+                           paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
+        state["daily_halt"] = True
+        return state
+
+    return process_tick_af(exchange, df, state, price, now_str, paper_mode, paper_trade_csv)
+
+
+# ── 메인 루프 한 틱 처리 (DL v17 단일코인용) ──────────────────────────────────
 def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                  paper_mode: bool = False, paper_trade_csv: Optional[Path] = None) -> dict:
-    # Antifragile 모드: DL 추론 불필요, OHLCV만 가져옴
-    if os.environ.get("STRATEGY", "dl_v17") == "antifragile":
-        try:
-            df = fetch_ohlcv_df(exchange, limit=FETCH_LIMIT)
-        except Exception as e:
-            log.error(f"OHLCV 조회 실패: {e}")
-            return state
-    else:
-        df = get_signals(exchange, models, scaler, device)
+    df = get_signals(exchange, models, scaler, device)
     if df is None or len(df) < SIG_ROLL_WIN + 10:
         return state
 
@@ -433,7 +485,6 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
     sig_ctx    = float(row.get("signal_context", 1.0))
     now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # 롤링 신호 히스토리 업데이트
     state["sig_long_hist"].append(sig_long)
     state["sig_short_hist"].append(sig_short)
     state["sig_long_hist"]  = state["sig_long_hist"][-SIG_ROLL_WIN:]
@@ -441,12 +492,12 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
 
     roll_l = float(np.mean(state["sig_long_hist"]))
     roll_s = float(np.mean(state["sig_short_hist"]))
-    overconfident = ((roll_l + roll_s) / 2.0) > params["sig_upper_thr"]
+    overconfident = ((roll_l + roll_s) / 2.0) > params.get("sig_upper_thr", 1.0)
 
     state["current_bar"] += 1
-    pos      = state["position"]
-    capital  = state["capital"]
-    peak     = state["peak_capital"]
+    pos     = state["position"]
+    capital = state["capital"]
+    peak    = state["peak_capital"]
 
     # ── 일일 손실 한도 (2%) ────────────────────────────────────────────────────
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -485,18 +536,17 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
     state["peak_capital"] = peak
     dd = (peak - equity) / (peak + 1e-9)
 
-    if dd > params["max_dd_cb"] and state["cooling_left"] == 0:
-        state["cooling_left"]  = params["cooling_bars"]
+    if dd > params.get("max_dd_cb", 1.0) and state["cooling_left"] == 0:
+        state["cooling_left"]  = params.get("cooling_bars", 0)
         state["cb_triggers"]  += 1
-        log.warning(f"[CB] 서킷브레이커 발동 #{state['cb_triggers']} | dd={dd:.2%} | equity={equity:.0f}")
+        log.warning(f"[CB] 서킷브레이커 발동 #{state['cb_triggers']} | dd={dd:.2%}")
         if pos != 0:
             _close_and_log(exchange, state, price, now_str, forced=True, paper_mode=paper_mode,
                            paper_trade_csv=paper_trade_csv)
             send_trade_alert(f"⚠️ <b>서킷브레이커</b> #{state['cb_triggers']}\n"
-                             f"DD={dd:.2%} → 쿨링 {params['cooling_bars']}봉")
+                             f"DD={dd:.2%} → 쿨링 {params.get('cooling_bars',0)}봉")
         return state
 
-    # ── 쿨링 중 ───────────────────────────────────────────────────────────────
     if state["cooling_left"] > 0:
         state["cooling_left"] -= 1
         if pos != 0:
@@ -504,18 +554,18 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                            paper_trade_csv=paper_trade_csv)
         return state
 
-    # ── 청산 체크 ─────────────────────────────────────────────────────────────
+    # ── 청산 체크 (DL v17) ────────────────────────────────────────────────────
     if pos != 0:
         pnl_raw  = pos * (price - state["entry_price"]) / (state["entry_price"] + 1e-9)
         pnl_lev  = pnl_raw * state["entry_lev"]
         hold_bars = state["current_bar"] - state["entry_bar"]
-        sl_pnl   = params["price_sl"] * state["entry_lev"]
-        tp_pnl   = params["price_tp"] * state["entry_lev"]
-        tiers    = params["tiers"]
+        sl_pnl   = params.get("price_sl", 0.02) * state["entry_lev"]
+        tp_pnl   = params.get("price_tp", 0.06) * state["entry_lev"]
+        tiers    = params.get("tiers", [])
 
-        reverse = hold_bars >= params["min_hold_bars"] and (
-            (pos ==  1 and sig_short >= tiers[-1][0]) or
-            (pos == -1 and sig_long  >= tiers[-1][0])
+        reverse = hold_bars >= params.get("min_hold_bars", 0) and (
+            (pos ==  1 and sig_short >= tiers[-1][0] if tiers else False) or
+            (pos == -1 and sig_long  >= tiers[-1][0] if tiers else False)
         )
 
         if pnl_lev <= -0.9 or pnl_lev <= -sl_pnl or pnl_lev >= tp_pnl or reverse:
@@ -530,15 +580,10 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                 f"자본: {state['capital']:,.0f} USDT"
             )
 
-    # ── Antifragile 전략 분기 ─────────────────────────────────────────────────
-    if os.environ.get("STRATEGY", "dl_v17") == "antifragile":
-        return process_tick_af(exchange, df, state, price, now_str,
-                               paper_mode, paper_trade_csv)
-
     # ── 신규 진입 (DL v17) ────────────────────────────────────────────────────
     if state["position"] == 0 and sig_ctx >= params.get("context_filter_thr", 0.0):
-        tiers  = params["tiers"]
-        rr_cap = params["rr_cap"]
+        tiers  = params.get("tiers", [])
+        rr_cap = params.get("rr_cap", 0.5)
         lev, rr = get_tier(sig_long, tiers)
 
         direction = 0
@@ -562,7 +607,6 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
             dir_str = "LONG 🟢" if direction == 1 else "SHORT 🔴"
 
             if paper_mode:
-                # 가상 진입: 주문 없이 상태만 기록
                 state["position"]        = direction
                 state["entry_price"]     = price
                 state["entry_time"]      = now_str
@@ -644,8 +688,8 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
         _write_paper_trade_csv({
             "timestamp":       now_str,
             "direction":       "long" if pos == 1 else "short",
-            "entry_price":     round(state["entry_price"], 2),
-            "exit_price":      round(price, 2),
+            "entry_price":     round(state["entry_price"], 4),
+            "exit_price":      round(price, 4),
             "hold_bars":       hold_bars,
             "leverage":        state["entry_lev"],
             "rr":              round(state["entry_rr"], 4),
@@ -656,9 +700,9 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
             "reason":          reason,
             "forced":          forced,
         }, paper_trade_csv)
-        log.info(f"[PAPER 청산] {reason} | 가격={price:,.1f} | PnL={pnl:+.4f} | 자본={state['capital']:,.0f}")
+        log.info(f"[PAPER 청산] {reason} | 가격={price:,.4f} | PnL={pnl:+.4f} | 자본={state['capital']:,.0f}")
     else:
-        log.info(f"[청산] {reason} | 가격={price:,.1f} | PnL={pnl:+.4f} | 자본={state['capital']:,.0f}")
+        log.info(f"[청산] {reason} | 가격={price:,.4f} | PnL={pnl:+.4f} | 자본={state['capital']:,.0f}")
 
     state["position"]          = 0
     state["entry_price"]       = 0.0
@@ -666,7 +710,6 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     state["entry_rr"]          = 0.0
     state["entry_sig_long"]    = 0.0
     state["entry_sig_short"]   = 0.0
-    # Antifragile 상태 리셋
     state["af_trail_sl"]       = 0.0
     state["af_peak_price"]     = 0.0
     state["af_pyramid_count"]  = 0
@@ -677,12 +720,11 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
 REPORT_INTERVAL = 12   # 12 × 5분 = 1시간
 
 
-# ── 1시간 상태 보고 ────────────────────────────────────────────────────────────
+# ── 단일코인 1시간 상태 보고 ──────────────────────────────────────────────────
 def build_hourly_report(exchange, state: dict, mode: str, paper_mode: bool = False) -> str:
     now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"🕐 <b>1시간 상태 보고</b> [{mode.upper()}]", f"⏰ {now}\n"]
 
-    # 잔고
     if paper_mode:
         lines.append("💰 <b>지갑 잔고</b>: paper 모드 미조회")
     else:
@@ -692,13 +734,12 @@ def build_hourly_report(exchange, state: dict, mode: str, paper_mode: bool = Fal
         except Exception:
             lines.append("💰 <b>지갑 잔고</b>: 조회 실패")
 
-    # 포지션
     pos = state["position"]
     if pos == 0:
         lines.append("📊 <b>포지션</b>: 없음 (관망)")
     else:
-        dir_str    = "LONG 🟢" if pos == 1 else "SHORT 🔴"
-        entry      = state["entry_price"]
+        dir_str   = "LONG 🟢" if pos == 1 else "SHORT 🔴"
+        entry     = state["entry_price"]
         if paper_mode:
             cur_price = state.get("last_price") or entry
         else:
@@ -707,37 +748,70 @@ def build_hourly_report(exchange, state: dict, mode: str, paper_mode: bool = Fal
                 cur_price = ex_pos.get("mark_price") or entry
             except Exception:
                 cur_price = entry
-        pnl_raw = pos * (cur_price - entry) / (entry + 1e-9)
-        pnl_lev = pnl_raw * state["entry_lev"]
+        pnl_raw   = pos * (cur_price - entry) / (entry + 1e-9)
+        pnl_lev   = pnl_raw * state["entry_lev"]
         hold_bars = state["current_bar"] - state["entry_bar"]
         lines.append(
             f"📊 <b>포지션</b>: {dir_str}\n"
-            f"   진입가: {entry:,.1f} | 레버: {state['entry_lev']}x\n"
+            f"   진입가: {entry:,.4f} | 레버: {state['entry_lev']}x\n"
             f"   보유: {hold_bars}봉 ({hold_bars*5//60}h {hold_bars*5%60}m)\n"
             f"   미실현 PnL(lev): {pnl_lev:+.2%}"
         )
 
-    # 시뮬 자본 & 수익률
-    capital  = state["capital"]
-    ret_pct  = (capital / INITIAL_CAPITAL - 1) * 100
-    peak     = state["peak_capital"]
-    dd       = (peak - capital) / (peak + 1e-9) * 100
+    capital = state["capital"]
+    ret_pct = (capital / INITIAL_CAPITAL - 1) * 100
+    peak    = state["peak_capital"]
+    dd      = (peak - capital) / (peak + 1e-9) * 100
     lines.append(
         f"\n📈 <b>수익률</b>: {ret_pct:+.2f}%"
         f"  (자본 {capital:,.0f} USDT)\n"
         f"   MDD: {dd:.2f}% | CB: {state['cb_triggers']}회"
     )
 
-    # 거래 통계
-    trades     = state.get("trade_log", [])
-    n_trades   = len(trades)
-    n_win      = sum(1 for t in trades if t.get("pnl", 0) > 0)
-    wr         = n_win / n_trades * 100 if n_trades else 0
-    cooling    = state.get("cooling_left", 0)
+    trades   = state.get("trade_log", [])
+    n_trades = len(trades)
+    n_win    = sum(1 for t in trades if t.get("pnl", 0) > 0)
+    wr       = n_win / n_trades * 100 if n_trades else 0
+    cooling  = state.get("cooling_left", 0)
     lines.append(
         f"\n🔢 <b>거래 통계</b>: 총 {n_trades}건 | WR {wr:.1f}%"
         + (f"\n⏸ 쿨링 중: {cooling}봉 남음" if cooling > 0 else "")
     )
+
+    return "\n".join(lines)
+
+
+# ── 멀티코인 1시간 상태 보고 ──────────────────────────────────────────────────
+def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"🕐 <b>1시간 보고 [MULTI-AF {mode.upper()}]</b>", f"⏰ {now}\n"]
+
+    coin_initial  = INITIAL_CAPITAL * MULTI_COIN_ALLOC   # 2,500 per coin
+    total_capital = sum(s["capital"] for s in all_states.values())
+    total_ret     = (total_capital / INITIAL_CAPITAL - 1) * 100
+    lines.append(f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT  ({total_ret:+.2f}%)\n")
+
+    for coin, state in all_states.items():
+        pos     = state["position"]
+        capital = state["capital"]
+        ret     = (capital / coin_initial - 1) * 100
+        peak    = state.get("peak_capital", capital)
+        dd      = (peak - capital) / (peak + 1e-9) * 100
+        pos_str = "없음" if pos == 0 else ("LONG 🟢" if pos == 1 else "SHORT 🔴")
+        trades  = state.get("trade_log", [])
+        n_win   = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        wr      = n_win / len(trades) * 100 if trades else 0.0
+
+        trail_str = ""
+        if pos != 0:
+            trail_sl  = state.get("af_trail_sl", 0)
+            pyr       = state.get("af_pyramid_count", 0)
+            trail_str = f" | trail={trail_sl:,.4f} pyr={pyr}"
+
+        lines.append(
+            f"<b>{coin}</b>: {capital:,.0f} USDT ({ret:+.2f}%) | {pos_str}{trail_str}\n"
+            f"  거래 {len(trades)}건 · WR {wr:.0f}% · MDD {dd:.1f}%"
+        )
 
     return "\n".join(lines)
 
@@ -761,21 +835,27 @@ def sleep_until_next_candle(on_wait_tick=None, poll_interval: float = STOP_POLL_
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 def main():
     load_env_file()
+    strategy   = os.environ.get("STRATEGY", "dl_v17")   # 반드시 최상단에서 정의
     trade_mode = os.getenv("TRADE_MODE", "sandbox").lower()
     paper_mode = (trade_mode == "paper")
+    multi_mode = (strategy == "antifragile")
 
-    paths = get_runtime_paths(paper_mode)
-    configure_logging(paths["log_file"])
+    # 로그 파일: 멀티코인은 공유 로그, 단일코인은 코인별
+    if multi_mode:
+        log_fname = "paper_multi.log" if paper_mode else "live_multi.log"
+        configure_logging(ROOT / "logs" / log_fname)
+    else:
+        paths = get_runtime_paths(paper_mode)
+        configure_logging(paths["log_file"])
 
     device = torch.device("mps"  if torch.backends.mps.is_available() else
                           "cuda" if torch.cuda.is_available() else "cpu")
 
-    # Antifragile 전략은 DL 모델 불필요 → 스킵 가능
-    if strategy == "antifragile":
-        params  = {}
-        models  = None
-        scaler  = None
-        log.info("[AF] DL 모델 로드 스킵 (Antifragile 전략은 rule-based)")
+    if multi_mode:
+        params = {}
+        models = None
+        scaler = None
+        log.info("[AF] DL 모델 로드 스킵 (Antifragile 전략 rule-based)")
     else:
         params = load_params()
         models, scaler = load_models(device)
@@ -787,113 +867,226 @@ def main():
     except Exception:
         tg_token, tg_chat_id = "", ""
 
-    state_file = paths["state_file"]
-    paper_trade_csv = paths["paper_trade_csv"]
-
-    coin     = os.environ.get("COIN", "BTC").upper()
-    strategy = os.environ.get("STRATEGY", "dl_v17")
-    log.info(f"{'='*60}")
-    log.info(f"  ConnectAI Trade Bot 시작")
-    log.info(f"  코인:     {coin}/USDT ({get_symbol()})")
+    log.info("=" * 60)
+    log.info("  ConnectAI Trade Bot 시작")
+    if multi_mode:
+        log.info(f"  코인:     {' / '.join(COINS_MULTI)} (멀티 4종목)")
+        log.info(f"  배분:     각 {MULTI_COIN_ALLOC*100:.0f}% (2,500 USDT/종목)")
+    else:
+        coin = os.environ.get("COIN", "BTC").upper()
+        log.info(f"  코인:     {coin}/USDT ({get_symbol()})")
     log.info(f"  전략:     {strategy}")
     log.info(f"  모드:     {trade_mode.upper()}")
     log.info(f"  디바이스: {device}")
-    log.info(f"{'='*60}")
+    log.info("=" * 60)
 
-    state_existed = state_file.exists()
-    state = (json.loads(state_file.read_text())
-             if state_existed else fresh_state())
+    # ══════════════════════════════════════════════════════════════
+    #  멀티코인 Antifragile 경로
+    # ══════════════════════════════════════════════════════════════
+    if multi_mode:
+        seed      = float(os.getenv("PAPER_SEED", "10000"))
+        coin_seed = seed * MULTI_COIN_ALLOC   # 2,500 per coin
 
-    # paper 모드: 최초 실행 시에만 가상 시드 초기화 (state 파일 없을 때만)
-    if paper_mode and not state_existed:
-        seed = float(os.getenv("PAPER_SEED", "10000"))
-        state["capital"]      = seed
-        state["peak_capital"] = seed
-        atomic_write_json(state_file, state)
-        log.info(f"[PAPER] 가상 시드 초기화: {seed:,.0f} USDT")
+        all_states: dict[str, dict] = {}
+        all_paths:  dict[str, dict] = {}
 
-    # 실계좌: 첫 실행 시 실잔고 동기화
-    if mode == "real" and len(state.get("trade_log", [])) == 0:
-        try:
-            real_bal = get_usdt_balance(exchange)
-            if real_bal > 0:
-                state["capital"]      = real_bal
-                state["peak_capital"] = real_bal
-                atomic_write_json(state_file, state)
-                log.info(f"[실계좌] 잔고 동기화: {real_bal:.2f} USDT")
-        except Exception as e:
-            log.warning(f"잔고 조회 실패, 기본값 사용: {e}")
+        for c in COINS_MULTI:
+            os.environ["COIN"] = c
+            cpaths = get_runtime_paths(paper_mode)
+            all_paths[c] = cpaths
+            sf = cpaths["state_file"]
 
-    log.info(f"{'='*55}")
-    log.info(f"라이브 트레이더 시작 | 모드: {mode.upper()} | 디바이스: {device}")
-    log.info(f"rr_cap={params['rr_cap']} | dd_cb={params['max_dd_cb']} | hold={params['min_hold_bars']}")
-    log.info(f"자본: {state['capital']:,.0f} USDT | 포지션: {state['position']}")
-    if paper_mode:
-        log.info(f"[PAPER] 거래 기록 → {paper_trade_csv}")
-    log.info(f"{'='*55}")
+            if sf.exists():
+                try:
+                    st = json.loads(sf.read_text())
+                    # AF 필드 누락 시 마이그레이션
+                    for k, v in DEFAULT_STATE.items():
+                        st.setdefault(k, copy.deepcopy(v))
+                    all_states[c] = st
+                except Exception:
+                    all_states[c] = fresh_state()
+            else:
+                st = fresh_state()
+                if paper_mode:
+                    st["capital"]      = coin_seed
+                    st["peak_capital"] = coin_seed
+                    st["daily_start_capital"] = coin_seed
+                    atomic_write_json(sf, st)
+                    log.info(f"[PAPER-{c}] 가상 시드 초기화: {coin_seed:,.0f} USDT")
+                all_states[c] = st
 
-    send_trade_alert(
-        f"🚀 <b>트레이딩 봇 시작</b> [{mode.upper()}]\n"
-        f"rr_cap={params['rr_cap']} | dd_cb={params['max_dd_cb']}\n"
-        f"자본: {state['capital']:,.0f} USDT"
-        + ("\n📄 거래 기록 저장 중" if paper_mode else "")
-    )
+        total_cap = sum(s["capital"] for s in all_states.values())
+        log.info(f"총 자본: {total_cap:,.0f} USDT | 종목당: {coin_seed:,.0f} USDT")
 
-    def _save(s):
-        atomic_write_json(state_file, s)
+        send_trade_alert(
+            f"🚀 <b>멀티코인 트레이딩 봇 시작</b> [{mode.upper()}]\n"
+            f"전략: Antifragile | 종목: {' / '.join(COINS_MULTI)}\n"
+            f"총 자본: {total_cap:,.0f} USDT (종목당 {coin_seed:,.0f})"
+            + ("\n📄 거래 기록 저장 중" if paper_mode else "")
+        )
 
-    def _poll_stop_command() -> bool:
-        nonlocal state
-        if not tg_token:
-            return False
-        try:
-            cmds, new_offset = poll_commands(
-                tg_token, tg_chat_id, state.get("tg_update_offset", 0)
-            )
-            if new_offset != state.get("tg_update_offset", 0):
-                state["tg_update_offset"] = new_offset
-                _save(state)
-            if "/stop" not in cmds:
+        def _save_all():
+            for c in COINS_MULTI:
+                atomic_write_json(all_paths[c]["state_file"], all_states[c])
+
+        def _poll_stop_multi() -> bool:
+            if not tg_token:
+                return False
+            try:
+                offset = all_states["BTC"].get("tg_update_offset", 0)
+                cmds, new_offset = poll_commands(tg_token, tg_chat_id, offset)
+                if new_offset != offset:
+                    for c in COINS_MULTI:
+                        all_states[c]["tg_update_offset"] = new_offset
+                if "/stop" not in cmds:
+                    return False
+                log.warning("[텔레그램] /stop 수신 → 봇 종료")
+                now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                for c in COINS_MULTI:
+                    os.environ["COIN"] = c
+                    s = all_states[c]
+                    if s["position"] != 0 and s.get("last_price", 0) > 0:
+                        _close_and_log(exchange, s, s["last_price"], now_s,
+                                       forced=True, reason="텔레그램 /stop",
+                                       paper_mode=paper_mode,
+                                       paper_trade_csv=all_paths[c]["paper_trade_csv"])
+                _save_all()
+                send_trade_alert("🛑 <b>봇 종료</b> (텔레그램 /stop)")
+                return True
+            except Exception as e:
+                log.warning(f"텔레그램 폴링 실패: {e}")
                 return False
 
-            log.warning("[텔레그램] /stop 수신 → 봇 종료")
-            last_price = state.get("last_price", 0.0)
-            now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            if state["position"] != 0 and last_price > 0:
-                _close_and_log(exchange, state, last_price, now_s,
-                               forced=True, reason="텔레그램 /stop",
-                               paper_mode=paper_mode,
-                               paper_trade_csv=paper_trade_csv)
-            _save(state)
-            send_trade_alert("🛑 <b>봇 종료</b> (텔레그램 /stop)")
-            return True
-        except Exception as e:
-            log.warning(f"텔레그램 폴링 실패: {e}")
-            return False
+        tick = 0
+        while True:
+            try:
+                if _poll_stop_multi():
+                    break
 
-    tick = 0
-    while True:
-        try:
-            if _poll_stop_command():
+                for c in COINS_MULTI:
+                    try:
+                        all_states[c] = _run_coin_tick_af(
+                            exchange, c, all_states[c], paper_mode,
+                            all_paths[c]["paper_trade_csv"]
+                        )
+                        atomic_write_json(all_paths[c]["state_file"], all_states[c])
+                    except Exception as e:
+                        log.error(f"[{c}] 틱 처리 오류: {e}", exc_info=True)
+
+                tick += 1
+                if tick % REPORT_INTERVAL == 0:
+                    report = build_hourly_report_multi(all_states, mode, paper_mode)
+                    send_trade_alert(report)
+                    log.info("[1시간 보고] 텔레그램 발송")
+
+            except KeyboardInterrupt:
+                log.info("수동 중지")
+                _save_all()
+                send_trade_alert("🛑 <b>봇 수동 중지</b>")
+                break
+            except Exception as e:
+                log.error(f"틱 처리 오류: {e}", exc_info=True)
+
+            if sleep_until_next_candle(on_wait_tick=_poll_stop_multi):
                 break
 
-            state = process_tick(exchange, models, scaler, device, params, state,
-                                 paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
-            _save(state)
-            tick += 1
-            if tick % REPORT_INTERVAL == 0:
-                report = build_hourly_report(exchange, state, mode, paper_mode=paper_mode)
-                send_trade_alert(report)
-                log.info("[1시간 보고] 텔레그램 발송")
-        except KeyboardInterrupt:
-            log.info("수동 중지")
-            _save(state)
-            send_trade_alert("🛑 <b>봇 수동 중지</b>")
-            break
-        except Exception as e:
-            log.error(f"틱 처리 오류: {e}", exc_info=True)
-        if sleep_until_next_candle(on_wait_tick=_poll_stop_command):
-            break
+    # ══════════════════════════════════════════════════════════════
+    #  단일코인 DL v17 경로
+    # ══════════════════════════════════════════════════════════════
+    else:
+        coin       = os.environ.get("COIN", "BTC").upper()
+        state_file = paths["state_file"]
+        paper_trade_csv = paths["paper_trade_csv"]
+
+        state_existed = state_file.exists()
+        state = (json.loads(state_file.read_text()) if state_existed else fresh_state())
+
+        if paper_mode and not state_existed:
+            seed = float(os.getenv("PAPER_SEED", "10000"))
+            state["capital"]      = seed
+            state["peak_capital"] = seed
+            atomic_write_json(state_file, state)
+            log.info(f"[PAPER] 가상 시드 초기화: {seed:,.0f} USDT")
+
+        if mode == "real" and len(state.get("trade_log", [])) == 0:
+            try:
+                real_bal = get_usdt_balance(exchange)
+                if real_bal > 0:
+                    state["capital"]      = real_bal
+                    state["peak_capital"] = real_bal
+                    atomic_write_json(state_file, state)
+                    log.info(f"[실계좌] 잔고 동기화: {real_bal:.2f} USDT")
+            except Exception as e:
+                log.warning(f"잔고 조회 실패, 기본값 사용: {e}")
+
+        log.info("=" * 55)
+        log.info(f"라이브 트레이더 시작 | 모드: {mode.upper()} | 디바이스: {device}")
+        log.info(f"rr_cap={params.get('rr_cap','N/A')} | dd_cb={params.get('max_dd_cb','N/A')} | hold={params.get('min_hold_bars','N/A')}")
+        log.info(f"자본: {state['capital']:,.0f} USDT | 포지션: {state['position']}")
+        if paper_mode:
+            log.info(f"[PAPER] 거래 기록 → {paper_trade_csv}")
+        log.info("=" * 55)
+
+        send_trade_alert(
+            f"🚀 <b>트레이딩 봇 시작</b> [{mode.upper()}]\n"
+            f"rr_cap={params.get('rr_cap','N/A')} | dd_cb={params.get('max_dd_cb','N/A')}\n"
+            f"자본: {state['capital']:,.0f} USDT"
+            + ("\n📄 거래 기록 저장 중" if paper_mode else "")
+        )
+
+        def _save(s):
+            atomic_write_json(state_file, s)
+
+        def _poll_stop_command() -> bool:
+            nonlocal state
+            if not tg_token:
+                return False
+            try:
+                cmds, new_offset = poll_commands(
+                    tg_token, tg_chat_id, state.get("tg_update_offset", 0)
+                )
+                if new_offset != state.get("tg_update_offset", 0):
+                    state["tg_update_offset"] = new_offset
+                    _save(state)
+                if "/stop" not in cmds:
+                    return False
+                log.warning("[텔레그램] /stop 수신 → 봇 종료")
+                last_price = state.get("last_price", 0.0)
+                now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                if state["position"] != 0 and last_price > 0:
+                    _close_and_log(exchange, state, last_price, now_s,
+                                   forced=True, reason="텔레그램 /stop",
+                                   paper_mode=paper_mode,
+                                   paper_trade_csv=paper_trade_csv)
+                _save(state)
+                send_trade_alert("🛑 <b>봇 종료</b> (텔레그램 /stop)")
+                return True
+            except Exception as e:
+                log.warning(f"텔레그램 폴링 실패: {e}")
+                return False
+
+        tick = 0
+        while True:
+            try:
+                if _poll_stop_command():
+                    break
+                state = process_tick(exchange, models, scaler, device, params, state,
+                                     paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
+                _save(state)
+                tick += 1
+                if tick % REPORT_INTERVAL == 0:
+                    report = build_hourly_report(exchange, state, mode, paper_mode=paper_mode)
+                    send_trade_alert(report)
+                    log.info("[1시간 보고] 텔레그램 발송")
+            except KeyboardInterrupt:
+                log.info("수동 중지")
+                _save(state)
+                send_trade_alert("🛑 <b>봇 수동 중지</b>")
+                break
+            except Exception as e:
+                log.error(f"틱 처리 오류: {e}", exc_info=True)
+            if sleep_until_next_candle(on_wait_tick=_poll_stop_command):
+                break
 
 
 if __name__ == "__main__":

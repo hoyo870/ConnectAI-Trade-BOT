@@ -1,7 +1,7 @@
 # ConnectAI Trade Bot
 
-BTC/USDT · ETH/USDT 5분봉 암호화폐 선물 자동매매 봇.  
-두 가지 독립 전략을 지원합니다: **DL v17** (TCN+Attention 신경망) / **Antifragile** (AdaptRSI + ATR trailing).
+BTC/USDT · ETH/USDT · SOL/USDT · XRP/USDT 5분봉 암호화폐 선물 자동매매 봇.  
+두 가지 독립 전략을 지원합니다: **DL v17** (TCN+Attention 신경망) / **Antifragile** (AdaptRSI + ATR trailing, 4종목 동시).
 
 ---
 
@@ -13,8 +13,11 @@ BTC/USDT · ETH/USDT 5분봉 암호화폐 선물 자동매매 봇.
 |------|-------|-----|-----|-----|----------|---------|
 | BTC | +226% | 8.30 ✅ | 3.1% | 8.45 | +127% ✅ | 9/10 |
 | ETH | +558% | 7.27 ✅ | 3.4% | 7.82 | +371% ✅ | 10/10 |
+| SOL | +779% | 7.20 ✅ | 2.8% | 8.42 | +436% ✅ | 10/10 |
+| XRP | +358% | 7.52 ✅ | 3.4% | 7.03 | +251% ✅ | 10/10 |
 
-> Top-5 제거 후에도 강력한 양수 수익 → outlier 독립적
+> Top-5 제거 후에도 강력한 양수 수익 → outlier 독립적  
+> **단일 프로세스로 4종목 동시 운영 — 시드 25%씩 균등 배분 (기본 2,500 USDT/종목)**
 
 ### DL v17 Instant (기존)
 
@@ -93,21 +96,33 @@ models/production/
 `.env` 파일에 전략을 설정합니다:
 
 ```bash
-STRATEGY=antifragile   # Antifragile Trailing Stop (권장)
-# STRATEGY=dl_v17      # DL v17 Instant (기존 기본값)
+STRATEGY=antifragile   # Antifragile: 4종목 자동 25%씩 분할 (권장)
+# STRATEGY=dl_v17      # DL v17: 단일 코인 (COIN 환경변수 필요)
+TRADE_MODE=paper       # paper | sandbox | real
+PAPER_SEED=10000       # 총 시드 (antifragile: 종목당 2,500 USDT)
 ```
 
 ### 라이브 트레이더
 
 ```bash
-# 포그라운드
-python src/live_trader.py
+# Antifragile — 4종목 동시 (단일 프로세스, COIN 지정 불필요)
+STRATEGY=antifragile TRADE_MODE=paper python src/live_trader.py
 
 # 백그라운드 (권장)
-nohup python src/live_trader.py > logs/live.log 2>&1 &
+nohup python src/live_trader.py > logs/paper_multi.log 2>&1 &
+```
 
-# 또는 deploy 스크립트 사용
-bash deploy/run_paper.sh
+로그/상태 파일 (Antifragile 멀티코인):
+```
+logs/paper_multi.log          ← 공유 로그
+logs/paper_state.json         ← BTC 상태
+logs/paper_state_eth.json     ← ETH 상태
+logs/paper_state_sol.json     ← SOL 상태
+logs/paper_state_xrp.json     ← XRP 상태
+logs/paper_trades.csv         ← BTC 거래 기록
+logs/paper_trades_eth.csv     ← ETH 거래 기록
+logs/paper_trades_sol.csv     ← SOL 거래 기록
+logs/paper_trades_xrp.csv     ← XRP 거래 기록
 ```
 
 `TRADE_MODE`:
@@ -118,10 +133,13 @@ bash deploy/run_paper.sh
 ### 백테스트
 
 ```bash
-# Antifragile 전략
+# Antifragile 전략 — 4종목 전체
+python scripts/backtest_antifragile.py --coin all --mode 2026
+python scripts/backtest_antifragile.py --coin all --mode random --seed 42
+
+# 단일 코인
 python scripts/backtest_antifragile.py --coin btc --mode 2026
-python scripts/backtest_antifragile.py --coin eth --mode 2026
-python scripts/backtest_antifragile.py --coin both --mode random --seed 42
+python scripts/backtest_antifragile.py --coin sol --mode random --seed 42
 
 # DL v17 전략
 python scripts/backtest.py --coin both --mode 2026

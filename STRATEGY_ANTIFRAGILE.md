@@ -1,8 +1,8 @@
 # Antifragile Trailing Stop 전략
 
-> 승격일: 2026-06-03 | 검증: BTC hist 9/10 · ETH hist 10/10  
+> 승격일: 2026-06-03 | 검증: BTC 9/10 · ETH 10/10 · SOL 10/10 · XRP 10/10  
 > 백테스트 스크립트: `scripts/backtest_antifragile.py`  
-> 활성화: `.env`에 `STRATEGY=antifragile` 추가
+> 활성화: `.env`에 `STRATEGY=antifragile` → 4종목 자동 25%씩 분할 매매
 
 ---
 
@@ -146,38 +146,49 @@ trailing stop 전략은 WR이 구조적으로 낮으므로 아래 기준 적용:
 
 ## 활성화 방법
 
-### paper 모드 (테스트)
+### paper 모드 — 4종목 동시 (단일 프로세스)
 
 ```bash
-# .env 수정
+# .env 설정
 STRATEGY=antifragile
 TRADE_MODE=paper
+PAPER_SEED=10000       # 총 시드 → 종목당 2,500 USDT 자동 분할
 
-# 재시작 (기존 포지션 없는 상태에서)
+# 실행 (COIN 지정 불필요)
 python src/live_trader.py
+# 또는 백그라운드
+nohup python src/live_trader.py > logs/paper_multi.log 2>&1 &
+```
+
+**생성 파일:**
+```
+logs/paper_multi.log           ← 공유 로그 (4종목 통합)
+logs/paper_state.json          ← BTC 상태 · paper_trades.csv
+logs/paper_state_eth.json      ← ETH 상태 · paper_trades_eth.csv
+logs/paper_state_sol.json      ← SOL 상태 · paper_trades_sol.csv
+logs/paper_state_xrp.json      ← XRP 상태 · paper_trades_xrp.csv
 ```
 
 ### 전략 전환 시 주의사항
 
 1. 기존 봇 중지: `kill <PID>`
-2. 열린 포지션 없는지 확인
-3. `.env`에 `STRATEGY=antifragile` 추가
-4. paper_state.json 초기화 (선택): 삭제 또는 유지
-5. 봇 재시작
+2. 열린 포지션 없는지 확인 (Bybit 대시보드)
+3. `.env`에 `STRATEGY=antifragile` 설정
+4. 상태파일 초기화 (선택): `rm logs/paper_state*.json`
+5. 봇 재시작 (COIN 환경변수 불필요)
 
 ### 백테스트 재실행
 
 ```bash
-# 2026 검증
-python scripts/backtest_antifragile.py --coin btc --mode 2026
-python scripts/backtest_antifragile.py --coin eth --mode 2026
-python scripts/backtest_antifragile.py --coin both --mode 2026
+# 4종목 전체 2026 검증
+python scripts/backtest_antifragile.py --coin all --mode 2026
 
-# 역사적 검증
-python scripts/backtest_antifragile.py --coin both --mode random --seed 42
+# 역사적 랜덤 검증 (4종목)
+python scripts/backtest_antifragile.py --coin all --mode random --seed 42
 
-# BB 이탈 포함 버전 (보수적)
-python scripts/backtest_antifragile.py --coin both --mode 2026 --require-bb
+# 단일 코인
+python scripts/backtest_antifragile.py --coin sol --mode 2026
+python scripts/backtest_antifragile.py --coin xrp --mode random --seed 42
 ```
 
 ---
