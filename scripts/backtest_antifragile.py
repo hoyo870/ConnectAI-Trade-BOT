@@ -281,42 +281,72 @@ def _normalize_index(df):
     return df
 
 
-def load_btc_full():
-    print("BTC 데이터 로드 중...")
-    try:
-        hist = _normalize_index(load_ohlcv_csv(ROOT / "data/raw/BTCUSDT_5m_20200101_20251231.csv"))
-    except Exception:
-        hist = pd.DataFrame()
-    try:
-        d26 = _normalize_index(load_ohlcv_csv(ROOT / "data/raw/BTCUSDT_5m_20260101_20260520.csv"))
-    except Exception:
-        par = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
-        d26 = _normalize_index(par[["open", "high", "low", "close", "volume"]].copy())
+# 코인별 설정 (데이터 경로, 역사 시작일)
+COIN_CONFIG = {
+    "btc": {"label": "BTC", "hist_start": "2020-01-01"},
+    "eth": {"label": "ETH", "hist_start": "2021-04-01"},
+    "sol": {"label": "SOL", "hist_start": "2021-06-01"},
+    "xrp": {"label": "XRP", "hist_start": "2020-06-01"},
+}
 
-    all_df = pd.concat([hist, d26]).sort_index() if not hist.empty else d26.sort_index()
+
+def load_coin_full(coin: str) -> pd.DataFrame:
+    """코인별 전체 OHLCV 로드 (BTC/ETH: 전용 경로, SOL/XRP: data/raw/ 자동 탐색)"""
+    coin = coin.lower()
+    label = coin.upper()
+    print(f"{label} 데이터 로드 중...")
+
+    if coin == "btc":
+        pieces = []
+        for fname in ["data/raw/BTCUSDT_5m_20200101_20251231.csv",
+                      "data/raw/BTCUSDT_5m_20260101_20260520.csv"]:
+            try:
+                pieces.append(_normalize_index(load_ohlcv_csv(ROOT / fname)))
+            except Exception:
+                pass
+        if not pieces:
+            # parquet fallback
+            par = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
+            pieces.append(_normalize_index(par[["open","high","low","close","volume"]].copy()))
+
+    elif coin == "eth":
+        pieces = [
+            _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_history.parquet")),
+            _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet")),
+        ]
+
+    else:
+        # SOL, XRP — data/raw/ 에서 패턴 탐색
+        sym = f"{label}USDT"
+        candidates = sorted((ROOT / "data/raw").glob(f"{sym}_5m_*.csv"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"{sym} 데이터 없음. 먼저 다운로드:\n"
+                f"  python src/data_fetcher.py --symbol {coin.upper()}/USDT --start 2021-01-01"
+            )
+        pieces = [_normalize_index(load_ohlcv_csv(f)) for f in candidates]
+
+    all_df = pd.concat(pieces).sort_index()
     all_df = all_df[~all_df.index.duplicated(keep="last")]
-    print(f"  {all_df.index[0].date()} ~ {all_df.index[-1].date()}  ({len(all_df)}행)")
+    all_df = all_df[all_df["close"].notna() & (all_df["close"] > 0)]
+    print(f"  {all_df.index[0].date()} ~ {all_df.index[-1].date()}  ({len(all_df):,}행)")
     return add_indicators(all_df)
 
 
-def load_eth_full():
-    print("ETH 데이터 로드 중...")
-    hist = _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_history.parquet"))
-    d26  = _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet"))
-    all_df = pd.concat([hist, d26]).sort_index()
-    all_df = all_df[~all_df.index.duplicated(keep="last")]
-    print(f"  {all_df.index[0].date()} ~ {all_df.index[-1].date()}  ({len(all_df)}행)")
-    return add_indicators(all_df)
+# 이전 함수 이름 유지 (하위 호환)
+def load_btc_full(): return load_coin_full("btc")
+def load_eth_full(): return load_coin_full("eth")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days):
+def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days,
+                          hist_start: str = None):
     all_df.dropna(subset=["_rsi", "_atr"], inplace=True)
     rng = random.Random(seed)
-    min_start = "2021-04-01" if "ETH" in coin_label else "2020-06-01"
+    min_start = hist_start or ("2021-04-01" if "ETH" in coin_label else "2020-06-01")
     possible = all_df[(all_df.index >= min_start) &
                       (all_df.index <= all_df.index[-1] - pd.Timedelta(days=window_days))].index
     chosen = sorted(rng.choices(possible, k=windows))
@@ -356,7 +386,8 @@ def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days):
 
 def main():
     parser = argparse.ArgumentParser(description="Antifragile Trailing Stop Backtest")
-    parser.add_argument("--coin",       default="btc", choices=["btc", "eth", "both"])
+    parser.add_argument("--coin",       default="btc",
+                        choices=["btc", "eth", "sol", "xrp", "both", "all"])
     parser.add_argument("--mode",       default="2026", choices=["2026", "random", "both"])
     parser.add_argument("--windows",    type=int,   default=10)
     parser.add_argument("--seed",       type=int,   default=42)
@@ -367,7 +398,11 @@ def main():
     parser.add_argument("--add-step",   type=float, default=0.5)
     args = parser.parse_args()
 
-    coins = ["btc", "eth"] if args.coin == "both" else [args.coin]
+    coin_map = {
+        "both": ["btc", "eth"],
+        "all":  ["btc", "eth", "sol", "xrp"],
+    }
+    coins = coin_map.get(args.coin, [args.coin])
 
     cfg = dict(
         require_bb      = args.require_bb,
@@ -384,23 +419,37 @@ def main():
               f"add_step={args.add_step}  require_bb={args.require_bb}")
         print(f"{'█'*66}")
 
-        if args.mode in ("2026", "both"):
-            if coin == "btc":
-                par  = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
-                df26 = _normalize_index(par[par.index >= "2026-01-01"].copy())
-            else:
-                df26 = _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet"))
-            df26 = add_indicators(df26)
-            days = (df26.index[-1] - df26.index[0]).days
-            print(f"\n{label} 2026: {df26.index[0].date()} ~ {df26.index[-1].date()}  ({days}일)")
-            result = run_antifragile(df26, **cfg)
-            print_result(f"{label} 2026", result, days)
+        try:
+            all_df_cache = None  # 2026 + random 모두 사용 시 재로드 방지
 
-        if args.mode in ("random", "both"):
-            loader = load_eth_full if coin == "eth" else load_btc_full
-            all_df = loader()
-            run_random_validation(all_df, label, cfg,
-                                  args.seed, args.windows, args.window_days)
+            if args.mode in ("2026", "both"):
+                if coin == "btc":
+                    par  = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
+                    df26 = _normalize_index(par[par.index >= "2026-01-01"].copy())
+                    df26 = add_indicators(df26)
+                elif coin == "eth":
+                    df26 = _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet"))
+                    df26 = add_indicators(df26)
+                else:
+                    # SOL/XRP: 전체 CSV에서 2026 구간 슬라이스
+                    all_df_cache = load_coin_full(coin)
+                    df26 = all_df_cache[all_df_cache.index >= "2026-01-01"].copy()
+
+                days = (df26.index[-1] - df26.index[0]).days
+                print(f"\n{label} 2026: {df26.index[0].date()} ~ {df26.index[-1].date()}  ({days}일)")
+                result = run_antifragile(df26, **cfg)
+                print_result(f"{label} 2026", result, days)
+
+            if args.mode in ("random", "both"):
+                if all_df_cache is None:
+                    all_df_cache = load_coin_full(coin)
+                hist_start = COIN_CONFIG.get(coin, {}).get("hist_start", "2020-01-01")
+                run_random_validation(all_df_cache, label, cfg,
+                                      args.seed, args.windows, args.window_days,
+                                      hist_start=hist_start)
+        except FileNotFoundError as e:
+            print(f"\n  ⚠️  {e}\n")
+            continue
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ import expert_models as em
 from exchange_client import (
     build_exchange, get_usdt_balance, get_position,
     set_leverage, place_market_order, close_position,
-    fetch_ohlcv_df, calc_qty,
+    fetch_ohlcv_df, calc_qty, get_symbol, get_min_qty,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 
@@ -55,8 +55,10 @@ BARS_PER_DAY   = 288
 FETCH_LIMIT    = 600    # 신호 롤링(100) + 지표 워밍(200) + 여유
 SIG_ROLL_WIN   = 100
 INITIAL_CAPITAL = 10_000.0
-MIN_QTY_BTC    = 0.001   # Bybit BTC/USDT 최소 주문 수량
 STOP_POLL_INTERVAL = 2.0
+
+def MIN_QTY():
+    return get_min_qty()  # COIN 환경변수 기준 동적 최소 수량
 
 
 # ── 파라미터 로드 ──────────────────────────────────────────────────────────────
@@ -147,15 +149,17 @@ def fresh_state() -> dict:
 
 
 def get_runtime_paths(paper_mode: bool) -> dict:
+    coin = os.environ.get("COIN", "BTC").lower()
+    prefix = f"_{coin}" if coin != "btc" else ""  # BTC는 기존 파일명 유지 (하위 호환)
     if paper_mode:
         return {
-            "state_file": ROOT / "logs/paper_state.json",
-            "log_file": ROOT / "logs/paper.log",
-            "paper_trade_csv": ROOT / "logs/paper_trades.csv",
+            "state_file":     ROOT / f"logs/paper_state{prefix}.json",
+            "log_file":       ROOT / f"logs/paper{prefix}.log",
+            "paper_trade_csv": ROOT / f"logs/paper_trades{prefix}.csv",
         }
     return {
-        "state_file": STATE_FILE,
-        "log_file": ROOT / "logs/live.log",
+        "state_file": ROOT / f"logs/live_state{prefix}.json",
+        "log_file":   ROOT / f"logs/live{prefix}.log",
         "paper_trade_csv": None,
     }
 
@@ -340,7 +344,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 if not paper_mode:
                     try:
                         add_qty = calc_qty(state["capital"], p["rr_add"], lev, price)
-                        if add_qty >= MIN_QTY_BTC:
+                        if add_qty >= MIN_QTY():
                             side = "buy" if pos == 1 else "sell"
                             place_market_order(exchange, side, add_qty)
                             send_trade_alert(
@@ -388,7 +392,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 try:
                     set_leverage(exchange, lev)
                     qty = calc_qty(state["capital"], p["rr_base"], lev, price)
-                    if qty < MIN_QTY_BTC:
+                    if qty < MIN_QTY():
                         log.warning(f"[AF] 최소수량 미달: {qty:.4f} — 진입 취소")
                         state["position"] = 0
                     else:
@@ -404,7 +408,15 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 # ── 메인 루프 한 틱 처리 ──────────────────────────────────────────────────────
 def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                  paper_mode: bool = False, paper_trade_csv: Optional[Path] = None) -> dict:
-    df = get_signals(exchange, models, scaler, device)
+    # Antifragile 모드: DL 추론 불필요, OHLCV만 가져옴
+    if os.environ.get("STRATEGY", "dl_v17") == "antifragile":
+        try:
+            df = fetch_ohlcv_df(exchange, limit=FETCH_LIMIT)
+        except Exception as e:
+            log.error(f"OHLCV 조회 실패: {e}")
+            return state
+    else:
+        df = get_signals(exchange, models, scaler, device)
     if df is None or len(df) < SIG_ROLL_WIN + 10:
         return state
 
@@ -569,9 +581,10 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                 try:
                     set_leverage(exchange, lev_int)
                     qty = calc_qty(capital, rr, lev_int, price)
-                    if qty < MIN_QTY_BTC:
-                        log.warning(f"[스킵] 최소수량 미달: {qty:.4f} BTC < {MIN_QTY_BTC} (자본 {capital:.2f} USDT)")
-                    if qty >= MIN_QTY_BTC:
+                    if qty < MIN_QTY():
+                        coin = os.environ.get("COIN", "BTC").upper()
+                        log.warning(f"[스킵] 최소수량 미달: {qty:.4f} {coin} < {MIN_QTY()} (자본 {capital:.2f} USDT)")
+                    if qty >= MIN_QTY():
                         side = "buy" if direction == 1 else "sell"
                         place_market_order(exchange, side, qty)
                         state["position"]        = direction
@@ -586,7 +599,7 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                         send_trade_alert(
                             f"📥 <b>진입</b> {dir_str}\n"
                             f"가격: {price:,.1f} | 레버: {lev_int}x | rr: {rr:.2f}\n"
-                            f"수량: {qty} BTC | 자본: {capital:,.0f} USDT"
+                            f"수량: {qty} {os.environ.get('COIN','BTC').upper()} | 자본: {capital:,.0f} USDT"
                         )
                 except Exception as e:
                     log.error(f"주문 실패: {e}")
@@ -754,10 +767,19 @@ def main():
     paths = get_runtime_paths(paper_mode)
     configure_logging(paths["log_file"])
 
-    params = load_params()
     device = torch.device("mps"  if torch.backends.mps.is_available() else
                           "cuda" if torch.cuda.is_available() else "cpu")
-    models, scaler = load_models(device)
+
+    # Antifragile 전략은 DL 모델 불필요 → 스킵 가능
+    if strategy == "antifragile":
+        params  = {}
+        models  = None
+        scaler  = None
+        log.info("[AF] DL 모델 로드 스킵 (Antifragile 전략은 rule-based)")
+    else:
+        params = load_params()
+        models, scaler = load_models(device)
+
     exchange, mode = build_exchange(trade_mode)
 
     try:
@@ -767,6 +789,16 @@ def main():
 
     state_file = paths["state_file"]
     paper_trade_csv = paths["paper_trade_csv"]
+
+    coin     = os.environ.get("COIN", "BTC").upper()
+    strategy = os.environ.get("STRATEGY", "dl_v17")
+    log.info(f"{'='*60}")
+    log.info(f"  ConnectAI Trade Bot 시작")
+    log.info(f"  코인:     {coin}/USDT ({get_symbol()})")
+    log.info(f"  전략:     {strategy}")
+    log.info(f"  모드:     {trade_mode.upper()}")
+    log.info(f"  디바이스: {device}")
+    log.info(f"{'='*60}")
 
     state_existed = state_file.exists()
     state = (json.loads(state_file.read_text())
