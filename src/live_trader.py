@@ -199,6 +199,14 @@ def _write_paper_trade_csv(row: dict, paper_trade_csv: Path):
         os.fsync(f.fileno())
 
 
+def _completed_ohlcv_df(df: pd.DataFrame, timeframe_minutes: int = 5) -> pd.DataFrame:
+    """Drop the currently forming candle; ccxt OHLCV usually includes it as the last row."""
+    if df.empty:
+        return df
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=timeframe_minutes)
+    return df[df.index <= cutoff]
+
+
 def atomic_write_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(path) + ".tmp")
@@ -292,6 +300,15 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     rsi_hi  = p["dt_rsi_hi"] if trend_down else (p["ut_rsi_hi"] if trend_up else p["rg_rsi_hi"])
     pos     = state["position"]
     lev     = p["leverage"]
+    trend_str = "DN" if trend_down else ("UP" if trend_up else "RG")
+    long_ok_now = rsi <= rsi_lo
+    short_ok_now = rsi >= rsi_hi and not long_ok_now
+    candle_ts = df.index[-1] if len(df.index) else "n/a"
+    log.info(
+        f"[{coin}/AF 신호] ts={candle_ts} price={price:,.4f} "
+        f"RSI={rsi:.1f} trend={trend_str} lo={rsi_lo} hi={rsi_hi} "
+        f"long={long_ok_now} short={short_ok_now} pos={pos} halt={state.get('daily_halt', False)}"
+    )
 
     # ── AF 상태 안전 초기화 (구버전 state 로드 또는 첫 실행 시) ───────────────────
     if pos != 0 and not state.get("af_trail_sl"):
@@ -313,9 +330,11 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
         if hit_stop or timeout:
             reason = "trail_SL" if hit_stop else "timeout"
+            entry_price = float(state.get("entry_price") or price)
+            entry_rr = float(state.get("entry_rr") or state.get("af_current_rr") or 0.0)
+            pnl_approx = pos * (price - entry_price) / (entry_price + 1e-9) * lev * entry_rr
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
-            pnl_approx = pos * (price - state.get("entry_price", price)) / (state.get("entry_price", price) + 1e-9) * lev * state.get("af_current_rr", 0)
             send_trade_alert(
                 f"📤 <b>[{coin}/AF] 청산</b> [{reason}]\n"
                 f"가격: {price:,.4f} | PnL: {pnl_approx:+.2%}\n"
@@ -365,13 +384,12 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
-        long_ok  = rsi <= rsi_lo
-        short_ok = rsi >= rsi_hi and not long_ok
+        long_ok  = long_ok_now
+        short_ok = short_ok_now
 
         direction = 1 if long_ok else (-1 if short_ok else 0)
         if direction != 0:
             dir_str    = "LONG 🟢" if direction == 1 else "SHORT 🔴"
-            trend_str  = "DN" if trend_down else ("UP" if trend_up else "RG")
             init_trail = (price - p["trail_atr_init"] * atr) if direction == 1 else \
                          (price + p["trail_atr_init"] * atr)
 
@@ -426,13 +444,16 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
     except Exception as e:
         log.error(f"[{coin}] OHLCV 조회 실패: {e}")
         return state
+    df = _completed_ohlcv_df(df)
 
     if len(df) < SIG_ROLL_WIN + 10:
+        log.warning(f"[{coin}/AF] 완성봉 부족: {len(df)}")
         return state
 
     row = df.iloc[-1]
     candle_ts = str(row.name)
     if state.get("last_candle_ts") == candle_ts:
+        log.info(f"[{coin}/AF 스킵] 중복 완성봉 ts={candle_ts}")
         return state
     state["last_candle_ts"] = candle_ts
 
@@ -450,6 +471,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         log.info(f"[{coin} 일일리셋] 시작자본={state['capital']:.0f} USDT")
 
     if state.get("daily_halt"):
+        log.info(f"[{coin}/AF 스킵] daily_halt=True")
         return state
 
     daily_start    = state.get("daily_start_capital", state["capital"])
@@ -656,26 +678,40 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     pos = state["position"]
     if pos == 0:
         return
+    entry_price = float(state.get("entry_price") or 0.0)
+    entry_lev = float(state.get("entry_lev") or 0.0)
+    entry_rr = float(state.get("entry_rr") or 0.0)
 
     if not paper_mode:
         try:
             ex_pos = get_position(exchange)
+            if entry_price <= 0 and float(ex_pos.get("entry_price") or 0.0) > 0:
+                entry_price = float(ex_pos["entry_price"])
             close_position(exchange, ex_pos)
         except Exception as e:
             log.error(f"청산 실패: {e}")
             return
 
-    pnl_raw   = pos * (price - state["entry_price"]) / (state["entry_price"] + 1e-9)
-    pnl       = max(pnl_raw * state["entry_lev"] * state["entry_rr"], -state["entry_rr"])
+    if entry_price <= 0 or entry_lev <= 0 or entry_rr <= 0:
+        log.error(
+            f"[청산 PnL 오류] invalid entry state: entry={entry_price}, "
+            f"lev={entry_lev}, rr={entry_rr}, exit={price}, pos={pos}"
+        )
+        pnl_raw = 0.0
+        pnl = 0.0
+    else:
+        pnl_raw = pos * (price - entry_price) / entry_price
+        pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
     hold_bars = state["current_bar"] - state["entry_bar"]
     state["capital"] *= (1 + pnl)
+    state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
     trade_row = {
         "time":       now_str,
         "direction":  pos,
-        "entry":      state["entry_price"],
+        "entry":      entry_price,
         "exit":       price,
-        "pnl":        round(pnl, 4),
+        "pnl":        round(pnl, 6),
         "capital":    round(state["capital"], 2),
         "forced":     forced,
         "reason":     reason,
@@ -688,14 +724,14 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
         _write_paper_trade_csv({
             "timestamp":       now_str,
             "direction":       "long" if pos == 1 else "short",
-            "entry_price":     round(state["entry_price"], 4),
+            "entry_price":     round(entry_price, 4),
             "exit_price":      round(price, 4),
             "hold_bars":       hold_bars,
-            "leverage":        state["entry_lev"],
-            "rr":              round(state["entry_rr"], 4),
+            "leverage":        entry_lev,
+            "rr":              round(entry_rr, 4),
             "sig_long_entry":  round(state.get("entry_sig_long",  0.0), 4),
             "sig_short_entry": round(state.get("entry_sig_short", 0.0), 4),
-            "pnl":             round(pnl, 4),
+            "pnl":             round(pnl, 6),
             "capital_after":   round(state["capital"], 2),
             "reason":          reason,
             "forced":          forced,
@@ -761,7 +797,7 @@ def build_hourly_report(exchange, state: dict, mode: str, paper_mode: bool = Fal
     capital = state["capital"]
     ret_pct = (capital / INITIAL_CAPITAL - 1) * 100
     peak    = state["peak_capital"]
-    dd      = (peak - capital) / (peak + 1e-9) * 100
+    dd      = max(0.0, (peak - capital) / (peak + 1e-9) * 100)
     lines.append(
         f"\n📈 <b>수익률</b>: {ret_pct:+.2f}%"
         f"  (자본 {capital:,.0f} USDT)\n"
@@ -789,14 +825,18 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
     coin_initial  = INITIAL_CAPITAL * MULTI_COIN_ALLOC   # 2,500 per coin
     total_capital = sum(s["capital"] for s in all_states.values())
     total_ret     = (total_capital / INITIAL_CAPITAL - 1) * 100
-    lines.append(f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT  ({total_ret:+.2f}%)\n")
+    total_trades  = sum(len(s.get("trade_log", [])) for s in all_states.values())
+    total_wins    = sum(sum(1 for t in s.get("trade_log", []) if t.get("pnl", 0) > 0) for s in all_states.values())
+    total_wr_str  = f" · WR {total_wins/total_trades*100:.0f}%" if total_trades else ""
+    lines.append(f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT  ({total_ret:+.2f}%)")
+    lines.append(f"📊 총 {total_trades}건{total_wr_str}\n")
 
     for coin, state in all_states.items():
         pos     = state["position"]
         capital = state["capital"]
         ret     = (capital / coin_initial - 1) * 100
         peak    = state.get("peak_capital", capital)
-        dd      = (peak - capital) / (peak + 1e-9) * 100
+        dd      = max(0.0, (peak - capital) / (peak + 1e-9) * 100)
         pos_str = "없음" if pos == 0 else ("LONG 🟢" if pos == 1 else "SHORT 🔴")
         trades  = state.get("trade_log", [])
         n_win   = sum(1 for t in trades if t.get("pnl", 0) > 0)
@@ -806,7 +846,12 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
         if pos != 0:
             trail_sl  = state.get("af_trail_sl", 0)
             pyr       = state.get("af_pyramid_count", 0)
-            trail_str = f" | trail={trail_sl:,.4f} pyr={pyr}"
+            last_px   = state.get("last_price", 0)
+            if last_px > 0 and trail_sl > 0:
+                dist_pct = abs(last_px - trail_sl) / last_px * 100
+                trail_str = f"\n  ↳ trail={trail_sl:,.4f} (-{dist_pct:.1f}%) · pyr={pyr}/3"
+            else:
+                trail_str = f"\n  ↳ trail={trail_sl:,.4f} · pyr={pyr}/3"
 
         lines.append(
             f"<b>{coin}</b>: {capital:,.0f} USDT ({ret:+.2f}%) | {pos_str}{trail_str}\n"
@@ -902,6 +947,7 @@ def main():
                     # AF 필드 누락 시 마이그레이션
                     for k, v in DEFAULT_STATE.items():
                         st.setdefault(k, copy.deepcopy(v))
+                    st["peak_capital"] = max(st.get("peak_capital", st["capital"]), st["capital"])
                     all_states[c] = st
                 except Exception:
                     all_states[c] = fresh_state()
@@ -938,6 +984,10 @@ def main():
                 if new_offset != offset:
                     for c in COINS_MULTI:
                         all_states[c]["tg_update_offset"] = new_offset
+                if "/account" in cmds:
+                    report = build_hourly_report_multi(all_states, mode, paper_mode)
+                    send_trade_alert(report)
+                    log.info("[텔레그램] /account 처리 완료")
                 if "/stop" not in cmds:
                     return False
                 log.warning("[텔레그램] /stop 수신 → 봇 종료")
@@ -1000,6 +1050,7 @@ def main():
 
         state_existed = state_file.exists()
         state = (json.loads(state_file.read_text()) if state_existed else fresh_state())
+        state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
         if paper_mode and not state_existed:
             seed = float(os.getenv("PAPER_SEED", "10000"))
