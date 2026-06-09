@@ -18,7 +18,7 @@ from logging.handlers import RotatingFileHandler
 sys.path.insert(0, "src")
 
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import numpy as np
@@ -141,8 +141,8 @@ AF_PARAMS = {
     "rg_rsi_hi":       70,    # 횡보:     숏 진입 RSI 임계값
     "ut_rsi_lo":       35,    # 상승추세: 롱 진입 RSI 임계값
     "ut_rsi_hi":       78,    # 상승추세: 숏 진입 RSI 임계값
-    "trail_atr_init":  0.5,   # 초기 trailing stop 거리 (ATR 배수)
-    "trail_atr_tight": 0.8,   # 피라미딩 후 tight trailing (ATR 배수)
+    "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
+    "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.10,  # 초기 자본 위험 비율
     "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
     "add_levels":      3,     # 최대 피라미딩 횟수
@@ -331,14 +331,18 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         if hit_stop or timeout:
             reason = "trail_SL" if hit_stop else "timeout"
             entry_price = float(state.get("entry_price") or price)
-            entry_rr = float(state.get("entry_rr") or state.get("af_current_rr") or 0.0)
-            pnl_approx = pos * (price - entry_price) / (entry_price + 1e-9) * lev * entry_rr
+            dir_str = "LONG 🟢" if pos == 1 else "SHORT 🔴"
+            capital_before = state["capital"]
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
+            capital_after = state["capital"]
+            pnl_usdt = capital_after - capital_before
+            pnl_pct  = (capital_after / (capital_before + 1e-9) - 1) * 100
             send_trade_alert(
-                f"📤 <b>[{coin}/AF] 청산</b> [{reason}]\n"
-                f"가격: {price:,.4f} | PnL: {pnl_approx:+.2%}\n"
-                f"자본: {state['capital']:,.0f} USDT"
+                f"📤 <b>{'[PAPER] ' if paper_mode else ''}[{coin}/AF] 청산</b> [{reason}] {dir_str}\n"
+                f"진입가: {entry_price:,.4f} → 청산가: {price:,.4f}\n"
+                f"PnL: {pnl_pct:+.2f}% ({pnl_usdt:+.1f} USDT)\n"
+                f"자본: {capital_before:,.0f} → {capital_after:,.0f} USDT"
             )
         else:
             # trailing stop 업데이트
@@ -845,17 +849,64 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
         trail_str = ""
         if pos != 0:
             trail_sl  = state.get("af_trail_sl", 0)
+            entry_p   = state.get("entry_price", 0)
             pyr       = state.get("af_pyramid_count", 0)
             last_px   = state.get("last_price", 0)
+            unreal_str = ""
+            if last_px > 0 and entry_p > 0:
+                pnl_raw = pos * (last_px - entry_p) / (entry_p + 1e-9)
+                pnl_lev = pnl_raw * state.get("entry_lev", 1) * state.get("entry_rr", 0.1)
+                unreal_str = f" | 미실현 {pnl_lev:+.2%}"
+            trail_dist = ""
             if last_px > 0 and trail_sl > 0:
                 dist_pct = abs(last_px - trail_sl) / last_px * 100
-                trail_str = f"\n  ↳ trail={trail_sl:,.4f} (-{dist_pct:.1f}%) · pyr={pyr}/3"
-            else:
-                trail_str = f"\n  ↳ trail={trail_sl:,.4f} · pyr={pyr}/3"
+                trail_dist = f" (-{dist_pct:.1f}%)"
+            trail_str = (
+                f"\n  ↳ 진입가={entry_p:,.4f}{unreal_str} · pyr={pyr}/3"
+                f"\n  ↳ trail청산={trail_sl:,.4f}{trail_dist}"
+            )
 
         lines.append(
             f"<b>{coin}</b>: {capital:,.0f} USDT ({ret:+.2f}%) | {pos_str}{trail_str}\n"
             f"  거래 {len(trades)}건 · WR {wr:.0f}% · MDD {dd:.1f}%"
+        )
+
+    return "\n".join(lines)
+
+
+# ── 멀티코인 KST 09:00 일일 보고 ──────────────────────────────────────────────
+def build_daily_report_multi(all_states: dict, mode: str, paper_mode: bool) -> str:
+    """UTC 00:00 (= KST 09:00) 날짜 변경 직전 상태로 전일 결과 보고."""
+    kst_now  = datetime.now(timezone.utc) + timedelta(hours=9)
+    kst_str  = kst_now.strftime("%Y-%m-%d %H:%M KST")
+    lines = [f"📅 <b>일일 보고 [MULTI-AF {mode.upper()}]</b>", f"⏰ {kst_str}\n"]
+
+    coin_initial      = INITIAL_CAPITAL * MULTI_COIN_ALLOC
+    total_capital     = sum(s["capital"] for s in all_states.values())
+    total_daily_start = sum(s.get("daily_start_capital", coin_initial) for s in all_states.values())
+    daily_ret  = (total_capital / (total_daily_start + 1e-9) - 1) * 100
+    daily_usdt = total_capital - total_daily_start
+    total_ret  = (total_capital / INITIAL_CAPITAL - 1) * 100
+    lines.append(
+        f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT\n"
+        f"   전일 대비: {daily_ret:+.2f}% ({daily_usdt:+.0f} USDT) | 누적: {total_ret:+.2f}%\n"
+    )
+
+    for coin, state in all_states.items():
+        capital  = state["capital"]
+        d_start  = state.get("daily_start_capital", coin_initial)
+        d_ret    = (capital / (d_start + 1e-9) - 1) * 100
+        d_usdt   = capital - d_start
+        tot_ret  = (capital / coin_initial - 1) * 100
+        trades   = state.get("trade_log", [])
+        n        = len(trades)
+        n_win    = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        wr       = n_win / n * 100 if n else 0
+        peak     = state.get("peak_capital", capital)
+        dd       = max(0.0, (peak - capital) / (peak + 1e-9) * 100)
+        lines.append(
+            f"<b>{coin}</b>: {capital:,.0f} USDT  전일 {d_ret:+.2f}% ({d_usdt:+.0f} USDT)\n"
+            f"  누적 {tot_ret:+.2f}% · {n}건 WR {wr:.0f}% · MDD {dd:.1f}%"
         )
 
     return "\n".join(lines)
@@ -1007,11 +1058,19 @@ def main():
                 log.warning(f"텔레그램 폴링 실패: {e}")
                 return False
 
-        tick = 0
+        last_report_hour = -1
+        last_daily_date  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         while True:
             try:
                 if _poll_stop_multi():
                     break
+
+                # 일일 보고: UTC 00:00 (KST 09:00) 날짜 변경 시, tick 처리 전에 발송
+                today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if today_utc != last_daily_date:
+                    send_trade_alert(build_daily_report_multi(all_states, mode, paper_mode))
+                    log.info(f"[일일 보고] {last_daily_date} 결산 → 텔레그램 발송")
+                    last_daily_date = today_utc
 
                 for c in COINS_MULTI:
                     try:
@@ -1023,8 +1082,10 @@ def main():
                     except Exception as e:
                         log.error(f"[{c}] 틱 처리 오류: {e}", exc_info=True)
 
-                tick += 1
-                if tick % REPORT_INTERVAL == 0:
+                # 1시간 보고: UTC 정각 단위 (시작 시간 무관)
+                cur_hour = datetime.now(timezone.utc).hour
+                if cur_hour != last_report_hour:
+                    last_report_hour = cur_hour
                     report = build_hourly_report_multi(all_states, mode, paper_mode)
                     send_trade_alert(report)
                     log.info("[1시간 보고] 텔레그램 발송")
@@ -1116,16 +1177,24 @@ def main():
                 log.warning(f"텔레그램 폴링 실패: {e}")
                 return False
 
-        tick = 0
+        last_report_hour = -1
+        last_daily_date  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         while True:
             try:
                 if _poll_stop_command():
                     break
+
+                today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if today_utc != last_daily_date:
+                    last_daily_date = today_utc
+
                 state = process_tick(exchange, models, scaler, device, params, state,
                                      paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
                 _save(state)
-                tick += 1
-                if tick % REPORT_INTERVAL == 0:
+
+                cur_hour = datetime.now(timezone.utc).hour
+                if cur_hour != last_report_hour:
+                    last_report_hour = cur_hour
                     report = build_hourly_report(exchange, state, mode, paper_mode=paper_mode)
                     send_trade_alert(report)
                     log.info("[1시간 보고] 텔레그램 발송")
