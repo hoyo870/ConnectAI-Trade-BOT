@@ -3,7 +3,7 @@ live_tools/bot_manage.py
 실계좌 통합 관리 스크립트
 
 사용법:
-  python live_tools/bot_manage.py init              # state 초기화 (1000 USDT, 코인당 250)
+  python live_tools/bot_manage.py init              # state 초기화 (거래소 잔고 자동 조회)
   python live_tools/bot_manage.py preflight         # 실계좌 시작 전 사전 검증
   python live_tools/bot_manage.py close             # 긴급 청산 dry-run
   python live_tools/bot_manage.py close --execute   # 긴급 청산 실행
@@ -25,10 +25,23 @@ ROOT     = Path(__file__).parent.parent
 LOGS_DIR = ROOT / "logs"
 sys.path.insert(0, str(Path(__file__).parent))
 
+# .env 로드 (live_trader.py와 동일 패턴)
+def _load_env_file():
+    env_path = ROOT / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+_load_env_file()
+
 COINS    = ["BTC", "ETH", "SOL", "XRP"]
 
-REAL_SEED          = 1000.0
-COIN_SEED          = REAL_SEED * 0.25     # 250 USDT per coin
+# BOT_SEED: .env 또는 환경변수로 지정 (없으면 1000 fallback, cmd_init은 exchange 자동 조회)
+REAL_SEED          = float(os.environ.get("BOT_SEED", "1000"))
+COIN_SEED          = REAL_SEED * 0.25
+AF_LEVERAGE        = int(os.environ.get("LEVERAGE", "5"))
 PORTFOLIO_DD_LIMIT = 0.05                 # 5% 포트폴리오 손실 한도
 BOT_STALE_SECONDS  = 360                  # 6분 미갱신 → 봇 이상 판단
 CHECK_INTERVAL     = 30                   # 감시 주기 (초)
@@ -55,6 +68,7 @@ DEFAULT_STATE = {
     "last_price":          0.0,
     "last_candle_ts":      None,
     "capital":             COIN_SEED,
+    "initial_capital":     COIN_SEED,
     "peak_capital":        COIN_SEED,
     "daily_start_capital": COIN_SEED,
     "daily_date":          None,
@@ -103,9 +117,26 @@ def now_str() -> str:
 # ─── init ─────────────────────────────────────────────────────────────────────
 
 def cmd_init(args):
+    # 시드 결정: --seed 인자 > 거래소 잔고 자동 조회 > BOT_SEED env > fallback 1000
+    seed = getattr(args, "seed", None)
+    if seed is None:
+        try:
+            from exchange_client import build_exchange, get_usdt_balance
+            os.environ["TRADE_MODE"] = "real"
+            _ex, _ = build_exchange("real")
+            bal = get_usdt_balance(_ex)
+            if bal > 0:
+                seed = bal
+                print(f"  거래소 잔고 자동 조회: {bal:.2f} USDT")
+        except Exception as _e:
+            print(f"  {WARN} 거래소 조회 실패 → BOT_SEED/기본값 사용: {_e}")
+            seed = REAL_SEED
+
+    coin_seed = round(seed * 0.25, 4)
+
     print("=" * 60)
     print(f"  실계좌 state 초기화")
-    print(f"  총 시드: {REAL_SEED:,.0f} USDT | 코인당: {COIN_SEED:,.0f} USDT")
+    print(f"  총 시드: {seed:,.2f} USDT | 코인당: {coin_seed:,.2f} USDT")
     print(f"  {now_str()}")
     print("=" * 60)
 
@@ -125,19 +156,24 @@ def cmd_init(args):
                 continue
 
             old_cap = existing.get("capital", 0)
-            if abs(old_cap - COIN_SEED) < 1.0 and not args.force:
-                print(f"  {PASS} {coin}: 이미 올바른 자본 ({old_cap:,.0f} USDT) — 변경 없음")
+            if abs(old_cap - coin_seed) < 0.5 and not args.force:
+                print(f"  {PASS} {coin}: 이미 올바른 자본 ({old_cap:,.2f} USDT) — 변경 없음")
                 continue
 
-            existing["capital"]             = COIN_SEED
-            existing["peak_capital"]        = max(existing.get("peak_capital", COIN_SEED), COIN_SEED)
-            existing["daily_start_capital"] = COIN_SEED
+            existing["capital"]          = coin_seed
+            existing["initial_capital"]  = coin_seed
+            existing["peak_capital"]     = max(existing.get("peak_capital", coin_seed), coin_seed)
+            existing["daily_start_capital"] = coin_seed
             atomic_write(path, existing)
-            print(f"  {PASS} {coin}: 자본 업데이트 {old_cap:,.0f} → {COIN_SEED:,.0f} USDT")
+            print(f"  {PASS} {coin}: 자본 업데이트 {old_cap:,.2f} → {coin_seed:,.2f} USDT")
         else:
             state = copy.deepcopy(DEFAULT_STATE)
+            state["capital"]          = coin_seed
+            state["initial_capital"]  = coin_seed
+            state["peak_capital"]     = coin_seed
+            state["daily_start_capital"] = coin_seed
             atomic_write(path, state)
-            print(f"  {PASS} {coin}: 신규 생성 {COIN_SEED:,.0f} USDT → {path.name}")
+            print(f"  {PASS} {coin}: 신규 생성 {coin_seed:,.2f} USDT → {path.name}")
 
     if not all_ok:
         print(f"\n{FAIL} 초기화 실패 — 포지션 해소 후 재실행")
@@ -151,11 +187,12 @@ def cmd_init(args):
         pos    = s.get("position", 0) if s else -1
         trades = len(s.get("trade_log", [])) if s else 0
         total += cap
-        mark   = PASS if abs(cap - COIN_SEED) < 1.0 and pos == 0 else WARN
-        print(f"  {mark} {coin}: {cap:,.0f} USDT | pos={pos} | trades={trades}")
-    print(f"\n  총 트래킹: {total:,.0f} USDT")
+        mark   = PASS if cap > 0 and pos == 0 else WARN
+        print(f"  {mark} {coin}: {cap:,.2f} USDT | pos={pos} | trades={trades}")
+    print(f"\n  총 트래킹: {total:,.2f} USDT")
     print(f"\n{PASS} 초기화 완료 — 실계좌 실행 준비됨")
-    print(f"     TRADE_MODE=real EXCHANGE=bingx python live_tools/live_trader.py")
+    exchange_name = os.environ.get("EXCHANGE", "bybit")
+    print(f"     python live_tools/run.py")
 
 
 # ─── preflight ────────────────────────────────────────────────────────────────
@@ -196,8 +233,10 @@ def cmd_preflight(args):
     print("\n[2] USDT 가용 잔고")
     try:
         bal  = get_usdt_balance(exchange)
-        mark = PASS if bal >= REAL_SEED * 0.9 else WARN
-        print(f"  {mark} 가용 잔고: {bal:,.2f} USDT (목표 ≥ {REAL_SEED:,.0f} — 이체 전이면 무시)")
+        mark = PASS if bal > 0 else FAIL
+        print(f"  {mark} 가용 잔고: {bal:,.2f} USDT")
+        if bal <= 0:
+            issues.append("잔고 0 — 거래소 입금 확인")
     except Exception as e:
         print(f"  {FAIL} 잔고 조회 실패: {e}")
         issues.append("잔고 조회 불가")
@@ -220,9 +259,9 @@ def cmd_preflight(args):
         if cap <= 0:
             issues.append(f"{coin} capital 이상: {cap}")
         print(f"  {mark} {coin}: {cap:,.0f} USDT | pos={pos_str} | trades={trades}")
-    print(f"\n  총 트래킹: {total_tracked:,.0f} USDT")
-    if abs(total_tracked - REAL_SEED) > 200:
-        print(f"  {WARN} 총 자본 편차 큼 → bot_manage.py init 재실행")
+    print(f"\n  총 트래킹: {total_tracked:,.2f} USDT")
+    if total_tracked <= 0:
+        print(f"  {WARN} 총 자본 0 → bot_manage.py init 재실행")
 
     # 4. 포지션 일치
     print("\n[4] 거래소 포지션 vs State 불일치 검사")
@@ -247,14 +286,14 @@ def cmd_preflight(args):
             print(f"  {WARN} {coin}: 포지션 조회 실패 ({e})")
 
     # 5. 레버리지
-    print("\n[5] 레버리지 설정 확인 (목표: 3x)")
-    print(f"  {PASS} 진입 시 set_leverage(3) 자동 호출 (exchange_client.py)")
+    print(f"\n[5] 레버리지 설정 확인 (목표: {AF_LEVERAGE}x)")
+    print(f"  {PASS} 진입 시 set_leverage({AF_LEVERAGE}) 자동 호출 (exchange_client.py)")
     for coin in COINS:
         os.environ["COIN"] = coin
         try:
             t0 = time.time()
-            set_leverage(exchange, 3)
-            print(f"  {PASS} {coin}: set_leverage(3) 성공 | {(time.time()-t0)*1000:.0f}ms")
+            set_leverage(exchange, AF_LEVERAGE)
+            print(f"  {PASS} {coin}: set_leverage({AF_LEVERAGE}) 성공 | {(time.time()-t0)*1000:.0f}ms")
         except Exception as e:
             err = str(e).lower()
             if any(k in err for k in ["position", "no position", "102100"]):
@@ -404,8 +443,8 @@ def _check_once(auto_kill: bool) -> dict:
     now_utc     = now_str()
     issues      = []
 
-    total_cap   = sum(states.get(c, {}).get("capital", REAL_SEED/4) for c in COINS)
-    total_start = sum(states.get(c, {}).get("daily_start_capital", REAL_SEED/4) for c in COINS)
+    total_cap   = sum(states.get(c, {}).get("capital", 0) for c in COINS)
+    total_start = sum(states.get(c, {}).get("daily_start_capital", states.get(c, {}).get("initial_capital", 0)) for c in COINS)
 
     # 미실현 PnL 추정 (state의 last_price 기반)
     for coin in COINS:
@@ -481,8 +520,7 @@ def cmd_watch(args):
 
     log.info(f"Watchdog 시작 | 주기={interval}s | auto_kill={auto_kill}")
     _send_alert(f"🛡️ Portfolio Watchdog 시작\n"
-                f"총 시드: {REAL_SEED:,.0f} USDT | 손실 한도: -{PORTFOLIO_DD_LIMIT:.0%}\n"
-                f"자동 종료: {'ON' if auto_kill else 'OFF'}")
+                f"손실 한도: -{PORTFOLIO_DD_LIMIT:.0%} | 자동 종료: {'ON' if auto_kill else 'OFF'}")
 
     last_hourly = time.time()
 
@@ -532,7 +570,7 @@ def cmd_resume(args):
         halted = s.get("daily_halt", False)
         if halted or args.force:
             s["daily_halt"]          = False
-            s["daily_start_capital"] = s.get("capital", COIN_SEED)
+            s["daily_start_capital"] = s.get("capital", s.get("initial_capital", 0))
             s["cb_triggers"]         = 0
             atomic_write(state_path(coin), s)
             print(f"  {PASS} {coin}: halt 해제 | 일일 기준자본 = {s['daily_start_capital']:,.0f} USDT")
@@ -588,7 +626,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 커맨드:
-  init        state 파일 초기화 (1000 USDT, 코인당 250)
+  init        state 파일 초기화 (거래소 잔고 자동 조회, --seed 수동 지정 가능)
   preflight   실계좌 시작 전 전체 검증
   close       긴급 청산 dry-run (--execute 로 실행)
   watch       포트폴리오 감시 데몬 (--kill, --dry-run)
@@ -597,8 +635,9 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="state 파일 초기화")
+    p_init = sub.add_parser("init", help="state 파일 초기화 (거래소 잔고 자동 조회)")
     p_init.add_argument("--force", action="store_true", help="강제 덮어쓰기")
+    p_init.add_argument("--seed",  type=float, default=None, help="총 시드 USDT 수동 지정 (미입력 시 거래소 잔고 자동 조회)")
 
     sub.add_parser("preflight", help="실계좌 시작 전 사전 검증")
 

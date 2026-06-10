@@ -115,6 +115,7 @@ DEFAULT_STATE = {
     "last_price":      0.0,
     "last_candle_ts":      None,    # 중복 틱 방지: 마지막 처리 완성봉 timestamp
     "capital":             INITIAL_CAPITAL,
+    "initial_capital":     INITIAL_CAPITAL,
     "peak_capital":        INITIAL_CAPITAL,
     "daily_start_capital": INITIAL_CAPITAL,
     "daily_date":          None,
@@ -897,19 +898,20 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"🕐 <b>1시간 보고 [MULTI-AF {mode.upper()}]</b>", f"⏰ {now}\n"]
 
-    coin_initial  = INITIAL_CAPITAL * MULTI_COIN_ALLOC   # 2,500 per coin
     total_capital = sum(s["capital"] for s in all_states.values())
-    total_ret     = (total_capital / INITIAL_CAPITAL - 1) * 100
+    total_initial = sum(s.get("initial_capital", INITIAL_CAPITAL * MULTI_COIN_ALLOC) for s in all_states.values())
+    total_ret     = (total_capital / (total_initial + 1e-9) - 1) * 100
     total_trades  = sum(len(s.get("trade_log", [])) for s in all_states.values())
     total_wins    = sum(sum(1 for t in s.get("trade_log", []) if t.get("pnl", 0) > 0) for s in all_states.values())
     total_wr_str  = f" · WR {total_wins/total_trades*100:.0f}%" if total_trades else ""
-    lines.append(f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT  ({total_ret:+.2f}%)")
+    lines.append(f"💰 <b>총 자본</b>: {total_capital:,.2f} USDT  ({total_ret:+.2f}%)")
     lines.append(f"📊 총 {total_trades}건{total_wr_str}\n")
 
     for coin, state in all_states.items():
-        pos     = state["position"]
-        capital = state["capital"]
-        ret     = (capital / coin_initial - 1) * 100
+        pos          = state["position"]
+        capital      = state["capital"]
+        coin_initial = state.get("initial_capital", INITIAL_CAPITAL * MULTI_COIN_ALLOC)
+        ret          = (capital / (coin_initial + 1e-9) - 1) * 100
         peak    = state.get("peak_capital", capital)
         dd      = max(0.0, (peak - capital) / (peak + 1e-9) * 100)
         pos_str = "없음" if pos == 0 else ("LONG 🟢" if pos == 1 else "SHORT 🔴")
@@ -952,23 +954,24 @@ def build_daily_report_multi(all_states: dict, mode: str, paper_mode: bool) -> s
     kst_str  = kst_now.strftime("%Y-%m-%d %H:%M KST")
     lines = [f"📅 <b>일일 보고 [MULTI-AF {mode.upper()}]</b>", f"⏰ {kst_str}\n"]
 
-    coin_initial      = INITIAL_CAPITAL * MULTI_COIN_ALLOC
     total_capital     = sum(s["capital"] for s in all_states.values())
-    total_daily_start = sum(s.get("daily_start_capital", coin_initial) for s in all_states.values())
+    total_initial     = sum(s.get("initial_capital", INITIAL_CAPITAL * MULTI_COIN_ALLOC) for s in all_states.values())
+    total_daily_start = sum(s.get("daily_start_capital", s.get("initial_capital", INITIAL_CAPITAL * MULTI_COIN_ALLOC)) for s in all_states.values())
     daily_ret  = (total_capital / (total_daily_start + 1e-9) - 1) * 100
     daily_usdt = total_capital - total_daily_start
-    total_ret  = (total_capital / INITIAL_CAPITAL - 1) * 100
+    total_ret  = (total_capital / (total_initial + 1e-9) - 1) * 100
     lines.append(
-        f"💰 <b>총 자본</b>: {total_capital:,.0f} USDT\n"
-        f"   전일 대비: {daily_ret:+.2f}% ({daily_usdt:+.0f} USDT) | 누적: {total_ret:+.2f}%\n"
+        f"💰 <b>총 자본</b>: {total_capital:,.2f} USDT\n"
+        f"   전일 대비: {daily_ret:+.2f}% ({daily_usdt:+.2f} USDT) | 누적: {total_ret:+.2f}%\n"
     )
 
     for coin, state in all_states.items():
-        capital  = state["capital"]
-        d_start  = state.get("daily_start_capital", coin_initial)
-        d_ret    = (capital / (d_start + 1e-9) - 1) * 100
-        d_usdt   = capital - d_start
-        tot_ret  = (capital / coin_initial - 1) * 100
+        capital      = state["capital"]
+        coin_initial = state.get("initial_capital", INITIAL_CAPITAL * MULTI_COIN_ALLOC)
+        d_start      = state.get("daily_start_capital", coin_initial)
+        d_ret        = (capital / (d_start + 1e-9) - 1) * 100
+        d_usdt       = capital - d_start
+        tot_ret      = (capital / (coin_initial + 1e-9) - 1) * 100
         trades   = state.get("trade_log", [])
         n        = len(trades)
         n_win    = sum(1 for t in trades if t.get("pnl", 0) > 0)
@@ -1038,7 +1041,7 @@ def main():
     log.info("  ConnectAI Trade Bot 시작")
     if multi_mode:
         log.info(f"  코인:     {' / '.join(COINS_MULTI)} (멀티 4종목)")
-        log.info(f"  배분:     각 {MULTI_COIN_ALLOC*100:.0f}% (2,500 USDT/종목)")
+        log.info(f"  배분:     각 {MULTI_COIN_ALLOC*100:.0f}%")
     else:
         coin = os.environ.get("COIN", "BTC").upper()
         log.info(f"  코인:     {coin}/USDT ({get_symbol()})")
@@ -1053,6 +1056,17 @@ def main():
     if multi_mode:
         seed      = float(os.getenv("PAPER_SEED", "10000"))
         coin_seed = seed * MULTI_COIN_ALLOC   # 2,500 per coin
+
+        # real 모드: 실계좌 잔고 조회 → 종목당 자본 계산
+        real_coin_seed: float | None = None
+        if mode == "real":
+            try:
+                real_bal = get_usdt_balance(exchange)
+                if real_bal > 0:
+                    real_coin_seed = real_bal * MULTI_COIN_ALLOC
+                    log.info(f"[실계좌] 잔고 조회: {real_bal:.2f} USDT → 종목당 {real_coin_seed:.2f} USDT")
+            except Exception as e:
+                log.warning(f"[실계좌] 잔고 조회 실패, INITIAL_CAPITAL 사용: {e}")
 
         all_states: dict[str, dict] = {}
         all_paths:  dict[str, dict] = {}
@@ -1076,20 +1090,29 @@ def main():
             else:
                 st = fresh_state()
                 if paper_mode:
-                    st["capital"]      = coin_seed
-                    st["peak_capital"] = coin_seed
+                    st["capital"]          = coin_seed
+                    st["initial_capital"]  = coin_seed
+                    st["peak_capital"]     = coin_seed
                     st["daily_start_capital"] = coin_seed
                     atomic_write_json(sf, st)
                     log.info(f"[PAPER-{c}] 가상 시드 초기화: {coin_seed:,.0f} USDT")
+                elif real_coin_seed is not None:
+                    st["capital"]          = real_coin_seed
+                    st["initial_capital"]  = real_coin_seed
+                    st["peak_capital"]     = real_coin_seed
+                    st["daily_start_capital"] = real_coin_seed
+                    atomic_write_json(sf, st)
+                    log.info(f"[REAL-{c}] 잔고 동기화: {real_coin_seed:.2f} USDT")
                 all_states[c] = st
 
         total_cap = sum(s["capital"] for s in all_states.values())
-        log.info(f"총 자본: {total_cap:,.0f} USDT | 종목당: {coin_seed:,.0f} USDT")
+        log.info(f"총 자본: {total_cap:,.2f} USDT | 종목당: {total_cap/len(all_states):.2f} USDT")
 
+        per_coin_cap = total_cap / len(all_states)
         send_trade_alert(
             f"🚀 <b>멀티코인 트레이딩 봇 시작</b> [{mode.upper()}]\n"
             f"전략: Antifragile | 종목: {' / '.join(COINS_MULTI)}\n"
-            f"총 자본: {total_cap:,.0f} USDT (종목당 {coin_seed:,.0f})"
+            f"총 자본: {total_cap:,.2f} USDT (종목당 {per_coin_cap:,.2f})"
             + ("\n📄 거래 기록 저장 중" if paper_mode else "")
         )
 
