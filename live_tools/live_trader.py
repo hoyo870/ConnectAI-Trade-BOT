@@ -470,7 +470,17 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                             log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
-                    _clear_entry_fields(state)
+                    try:
+                        orphan = get_position(exchange)
+                        if orphan["side"] and orphan["size"] > 0:
+                            log.warning(f"[{coin}/AF] 주문 예외 후 거래소 포지션 감지 — state 복원 (orphan)")
+                            state["entry_qty"]       = orphan["size"]
+                            state["avg_entry_price"] = float(orphan["entry_price"] or state.get("entry_price", 0))
+                        else:
+                            _clear_entry_fields(state)
+                    except Exception as e2:
+                        log.warning(f"[{coin}/AF] orphan 포지션 확인 실패: {e2}")
+                        _clear_entry_fields(state)
 
     return state
 
@@ -657,20 +667,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     else:
         log.info(f"[청산] {reason} | 가격={price:,.4f} | PnL={pnl:+.4f} | 자본={state['capital']:,.0f}")
 
-    state["position"]          = 0
-    state["entry_price"]       = 0.0
-    state["avg_entry_price"]   = 0.0
-    state["entry_qty"]         = 0.0
-    state["entry_lev"]         = 1.0
-    state["entry_rr"]          = 0.0
-    state["entry_sig_long"]    = 0.0
-    state["entry_sig_short"]   = 0.0
-    state["af_trail_sl"]       = 0.0
-    state["af_peak_price"]     = 0.0
-    state["af_pyramid_count"]  = 0
-    state["af_current_rr"]     = 0.0
-    state["af_entry_atr"]      = 0.0
-    state["af_registered_sl"]  = 0.0
+    _clear_entry_fields(state)
 
 
 REPORT_INTERVAL = 12   # 12 × 5분 = 1시간
@@ -705,7 +702,7 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
         trail_str = ""
         if pos != 0:
             trail_sl  = state.get("af_trail_sl", 0)
-            entry_p   = state.get("entry_price", 0)
+            entry_p   = state.get("avg_entry_price") or state.get("entry_price", 0)
             pyr       = state.get("af_pyramid_count", 0)
             last_px   = state.get("last_price", 0)
             unreal_str = ""

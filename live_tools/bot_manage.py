@@ -16,7 +16,7 @@ live_tools/bot_manage.py
   Bybit : taker 0.044%  maker 0.020%
   BingX : taker 0.050%  maker 0.020%  (50% 페이백 → 실효 taker 0.025%)
 """
-import sys, os, json, copy, time, signal, subprocess, argparse, logging
+import sys, os, json, copy, time, signal, subprocess, argparse, logging, fcntl
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -58,6 +58,8 @@ FAIL = "❌"
 DEFAULT_STATE = {
     "position":            0,
     "entry_price":         0.0,
+    "avg_entry_price":     0.0,
+    "entry_qty":           0.0,
     "entry_time":          None,
     "entry_lev":           1.0,
     "entry_rr":            0.0,
@@ -84,6 +86,7 @@ DEFAULT_STATE = {
     "af_pyramid_count":    0,
     "af_current_rr":       0.0,
     "af_entry_atr":        0.0,
+    "af_registered_sl":    0.0,
 }
 
 
@@ -105,9 +108,16 @@ def load_state(coin: str) -> Optional[dict]:
 
 
 def atomic_write(path: Path, data: dict):
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    tmp.replace(path)
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            tmp = Path(str(path) + f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+            tmp.replace(path)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def now_str() -> str:

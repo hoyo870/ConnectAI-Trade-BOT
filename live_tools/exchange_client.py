@@ -70,7 +70,7 @@ def _load_env() -> dict:
 def _order_params(exchange, reduce_only: bool = False) -> dict:
     """거래소별 주문 파라미터. Bybit은 category=linear + positionIdx=0(one-way) 필수."""
     if exchange.id == "bybit":
-        return {"reduceOnly": reduce_only, "category": "linear", "positionIdx": 0}
+        return {"reduceOnly": reduce_only, "category": "linear", "positionIdx": "0"}
     return {"reduceOnly": reduce_only}
 
 
@@ -210,14 +210,23 @@ def set_position_stop_loss(exchange, trail_sl: float) -> None:
         symbol_raw = coin + "USDT"   # BTC/USDT:USDT → BTCUSDT
         tick = _TICK_SIZE_MAP.get(coin, 0.01)
         sl_price = _round_to_tick(trail_sl, tick)
-        exchange.private_post_v5_position_trading_stop({
+        payload = {
             "category":    "linear",
             "symbol":      symbol_raw,
             "stopLoss":    str(sl_price),
             "slTriggerBy": "MarkPrice",
             "tpslMode":    "Full",
             "positionIdx": "0",   # one-way mode 필수
-        })
+        }
+        for attempt in range(3):
+            try:
+                exchange.private_post_v5_position_trading_stop(payload)
+                return
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise
     elif exchange.id == "bingx":
         # BingX position-level SL은 미지원 — 무시 (봉 close 기준 fallback)
         pass
