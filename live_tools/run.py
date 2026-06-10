@@ -335,6 +335,7 @@ def api_status():
         "portfolio": summary,
         "coins":     coins,
         "mode":      "paper" if _paper_mode else "real",
+        "exchange":  os.environ.get("EXCHANGE", "bingx").lower(),
         "ts":        datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     })
 
@@ -576,7 +577,7 @@ async function updateStatus() {
     const pnl = d.portfolio.daily_pnl_pct;
     const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400';
     document.getElementById('mode-badge').textContent =
-      (d.mode === 'paper' ? '📝 PAPER MODE' : '🔴 REAL MODE') + '  |  BingX';
+      (d.mode === 'paper' ? '📝 PAPER MODE' : '🔴 REAL MODE') + '  |  ' + (d.exchange || 'bingx').toUpperCase();
     document.getElementById('total-capital').textContent = '$' + d.portfolio.total_capital.toLocaleString();
     document.getElementById('daily-pnl').innerHTML =
       `<span class="${pnlColor}">일일 ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
