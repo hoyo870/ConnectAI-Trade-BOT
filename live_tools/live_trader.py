@@ -13,6 +13,7 @@ STRATEGY 옵션 (.env):
   python live_tools/live_trader.py
   nohup python live_tools/live_trader.py > logs/live.log 2>&1 &
 """
+from __future__ import annotations
 import sys, os, json, time, logging, csv, copy
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
