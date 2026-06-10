@@ -10,14 +10,13 @@ STRATEGY 옵션 (.env):
   antifragile : AdaptRSI + ATR trailing stop (4종목 자동 25%씩 분할)
 
 실행:
-  python src/live_trader.py
-  nohup python src/live_trader.py > logs/live.log 2>&1 &
+  python live_tools/live_trader.py
+  nohup python live_tools/live_trader.py > logs/live.log 2>&1 &
 """
 import sys, os, json, time, logging, csv, copy
 from logging.handlers import RotatingFileHandler
-sys.path.insert(0, "src")
-
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -430,6 +429,18 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     else:
                         side = "buy" if direction == 1 else "sell"
                         place_market_order(exchange, side, qty)
+                        time.sleep(1)
+                        try:
+                            filled = get_position(exchange)
+                            if filled["side"] and filled["entry_price"] > 0:
+                                actual_px = float(filled["entry_price"])
+                                slip_pct  = (actual_px - price) / price * 100 * direction
+                                state["entry_price"]           = actual_px
+                                state["_entry_signal_price"]   = price
+                                state["_entry_slippage_pct"]   = round(slip_pct, 4)
+                                log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
+                        except Exception as e2:
+                            log.warning(f"[{coin}/AF] 체결확인 실패: {e2}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
                     state["position"] = 0
@@ -686,15 +697,30 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     entry_lev = float(state.get("entry_lev") or 0.0)
     entry_rr = float(state.get("entry_rr") or 0.0)
 
+    mark_px = price
     if not paper_mode:
         try:
             ex_pos = get_position(exchange)
             if entry_price <= 0 and float(ex_pos.get("entry_price") or 0.0) > 0:
                 entry_price = float(ex_pos["entry_price"])
+            mark_px = float(ex_pos.get("mark_price") or price)
             close_position(exchange, ex_pos)
+            time.sleep(1)
+            try:
+                ex_after = get_position(exchange)
+                if ex_after["side"] is None or ex_after["size"] == 0:
+                    log.info(f"[청산확인] 포지션 정상 청산")
+                else:
+                    log.warning(f"[청산경고] 잔여포지션: side={ex_after['side']} size={ex_after['size']}")
+            except Exception as e2:
+                log.warning(f"[청산확인] 조회실패: {e2}")
+            slip_exit_pct = round((mark_px - price) / (price + 1e-9) * 100 * pos, 4)
+            if abs(slip_exit_pct) > 0.03:
+                log.info(f"[슬리피지] 신호={price:,.4f} 마크={mark_px:,.4f} ({slip_exit_pct:+.3f}%)")
         except Exception as e:
             log.error(f"청산 실패: {e}")
             return
+    slip_exit_pct = round((mark_px - price) / (price + 1e-9) * 100 * pos, 4)
 
     if entry_price <= 0 or entry_lev <= 0 or entry_rr <= 0:
         log.error(
@@ -711,14 +737,17 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
     trade_row = {
-        "time":       now_str,
-        "direction":  pos,
-        "entry":      entry_price,
-        "exit":       price,
-        "pnl":        round(pnl, 6),
-        "capital":    round(state["capital"], 2),
-        "forced":     forced,
-        "reason":     reason,
+        "time":               now_str,
+        "direction":          pos,
+        "entry":              entry_price,
+        "exit":               price,
+        "pnl":                round(pnl, 6),
+        "capital":            round(state["capital"], 2),
+        "forced":             forced,
+        "reason":             reason,
+        "slippage_entry_pct": round(state.pop("_entry_slippage_pct", 0.0), 4),
+        "slippage_exit_pct":  slip_exit_pct if not paper_mode else 0.0,
+        "exit_mark":          round(mark_px, 4) if not paper_mode else round(price, 4),
     }
     state["trade_log"].append(trade_row)
 

@@ -12,3 +12,4 @@ ccxt>=4.3.0
 pyyaml>=6.0.1
 tqdm>=4.66.0
 tensorboard>=2.16.0
+flask>=3.0.0
