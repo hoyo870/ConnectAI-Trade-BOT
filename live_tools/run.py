@@ -757,6 +757,22 @@ def _validate_real_mode_startup():
     _auto_init_if_needed()
 
 
+def _set_leverage_all_coins():
+    """시작 시 전 종목 레버리지 거래소 등록. 성공/실패 supervisor.log에 기록."""
+    from exchange_client import build_exchange, set_leverage as _set_lev
+    leverage = int(os.environ.get("LEVERAGE", "5"))
+    log.info(f"[startup] 레버리지 일괄 설정 시작: {leverage}x")
+    try:
+        exchange, _ = build_exchange("real")
+    except Exception as e:
+        log.warning(f"[startup] 거래소 연결 실패 — 레버리지 설정 스킵: {e}")
+        return
+    for coin in ["BTC", "ETH", "SOL", "XRP"]:
+        os.environ["COIN"] = coin
+        _set_lev(exchange, leverage)
+    log.info(f"[startup] 레버리지 일괄 설정 완료")
+
+
 # ─── 진입점 ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -777,11 +793,7 @@ def main():
     _auto_restart = not args.no_restart
     _processes    = _make_processes(paper_mode)
 
-    if not paper_mode:
-        # state 파일 검증
-        _validate_real_mode_startup()
-
-    # 로깅
+    # 로깅 (startup 이전에 초기화해야 exchange API 로그가 기록됨)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -791,6 +803,12 @@ def main():
             logging.StreamHandler(sys.stdout),
         ]
     )
+
+    if not paper_mode:
+        # state 파일 검증 + 없으면 자동 init
+        _validate_real_mode_startup()
+        # 전 종목 레버리지 거래소 등록
+        _set_leverage_all_coins()
 
     _acquire_lock()
 
