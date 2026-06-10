@@ -46,11 +46,13 @@ open http://127.0.0.1:8765
 ### 실행
 
 ```bash
-python live_tools/run.py                    # 실계좌 (기본)
-python live_tools/run.py --paper            # Paper 모드 (API 조회 + 가상 매매)
+python live_tools/run.py                    # .env의 TRADE_MODE 기준으로 실행
 python live_tools/run.py --port 8080        # 포트 변경 (기본: 8765)
-python live_tools/run.py --no-auto-restart  # 자동 재시작 비활성화
+python live_tools/run.py --no-auto-restart  # 자동 재시작 비활성화 (기본: 활성화)
 ```
+
+> 실행 모드는 `.env`의 `TRADE_MODE` 값으로 결정됩니다.
+> `TRADE_MODE=real` → 실계좌 + watchdog 실행 / `TRADE_MODE=paper` → 가상매매만
 
 ### 대시보드 기능 (`http://127.0.0.1:8765`)
 

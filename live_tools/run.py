@@ -742,16 +742,10 @@ def main():
     _load_env()
 
     parser = argparse.ArgumentParser(description="TradeBot 통합 실행 + 대시보드")
-    parser.add_argument("--paper",           action="store_true",
-                        help="paper 모드 강제 (TRADE_MODE=paper 로 override)")
     parser.add_argument("--port",            type=int, default=8765, help="대시보드 포트 (기본: 8765)")
     parser.add_argument("--no-auto-restart", action="store_true",   dest="no_restart",
-                        help="자동 재시작 비활성화")
+                        help="자동 재시작 비활성화 (기본: 활성화)")
     args = parser.parse_args()
-
-    # --paper 플래그가 있으면 .env 값 무시하고 paper 강제
-    if args.paper:
-        os.environ["TRADE_MODE"] = "paper"
 
     trade_mode = os.environ.get("TRADE_MODE", "paper").lower()
     paper_mode = (trade_mode != "real")   # paper / sandbox 모두 paper_mode=True
