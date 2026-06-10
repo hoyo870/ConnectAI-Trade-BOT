@@ -1,0 +1,12 @@
+services:
+  trade-bot:
+    build: .
+    container_name: hy-trade-bot
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
