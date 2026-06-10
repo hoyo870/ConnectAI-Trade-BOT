@@ -321,9 +321,12 @@ def api_status():
     summary = _portfolio_summary(states)
     coins   = {
         coin: {
-            "capital":  round(s.get("capital", 0), 2),
-            "position": s.get("position", 0),
-            "daily_halt": s.get("daily_halt", False),
+            "capital":     round(s.get("capital", 0), 2),
+            "position":    s.get("position", 0),
+            "daily_halt":  s.get("daily_halt", False),
+            "entry_price": round(s.get("entry_price", 0), 4),
+            "trail_sl":    round(s.get("af_trail_sl", 0), 4),
+            "last_price":  round(s.get("last_price", 0), 4),
         }
         for coin, s in states.items()
     }
@@ -548,11 +551,20 @@ function renderCoins(coins) {
   const el = document.getElementById('coin-cards');
   el.innerHTML = Object.entries(coins).map(([c,s]) => {
     const posStr = s.position === 0 ? '없음' : (s.position === 1 ? 'LONG 🟢' : 'SHORT 🔴');
-    const dot = s.daily_halt ? '🔴' : '';
-    return `<div class="flex justify-between text-sm py-1 border-b border-slate-800 last:border-0">
-      <span style="color:${COIN_COLORS[c]||'#94a3b8'}">${c} ${dot}</span>
-      <span>$${s.capital.toFixed(0)}</span>
-      <span class="text-slate-400 text-xs">${posStr}</span>
+    const dot = s.daily_halt ? ' 🔴' : '';
+    const posDetail = s.position !== 0 && s.entry_price > 0
+      ? `<div class="text-xs text-slate-500 mt-0.5 pl-1">
+           진입 <span class="text-slate-300">${s.entry_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}</span>
+           &nbsp;|&nbsp;
+           Trail <span class="text-yellow-400">${s.trail_sl > 0 ? s.trail_sl.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4}) : '-'}</span>
+         </div>`
+      : '';
+    return `<div class="py-1 border-b border-slate-800 last:border-0">
+      <div class="flex justify-between text-sm">
+        <span style="color:${COIN_COLORS[c]||'#94a3b8'}">${c}${dot}</span>
+        <span>$${s.capital.toFixed(0)}</span>
+        <span class="text-slate-400 text-xs">${posStr}</span>
+      </div>${posDetail}
     </div>`;
   }).join('');
 }
