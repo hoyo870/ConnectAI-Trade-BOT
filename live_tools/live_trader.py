@@ -133,21 +133,23 @@ DEFAULT_STATE = {
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
-# 검증: BTC 9/10 +212%/3개월, ETH 10/10 +326%, SOL 10/10 +1572%, XRP 10/10 +4213%
+# 검증: BTC 9/10 +419%/3개월, ETH 10/10 +678%, SOL 10/10 +2944%, XRP 10/10 +10985%
+# 2026-06-10: ut_rsi_lo 35→40, ut_rsi_hi 78→85 (E.UT-NoShrt, 4종목 전수 개선)
+# 2026-06-10: leverage 3→5 (레버리지 스윕 — 4종목 hist 9~10/10 유지, MDD ≤5.6%)
 AF_PARAMS = {
     "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
     "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
     "rg_rsi_lo":       30,    # 횡보:     롱 진입 RSI 임계값
     "rg_rsi_hi":       70,    # 횡보:     숏 진입 RSI 임계값
-    "ut_rsi_lo":       35,    # 상승추세: 롱 진입 RSI 임계값
-    "ut_rsi_hi":       78,    # 상승추세: 숏 진입 RSI 임계값
+    "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값 (35→40, 상승장 롱 완화)
+    "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값 (78→85, 상승장 숏 억제)
     "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
     "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.10,  # 초기 자본 위험 비율
     "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
     "add_levels":      3,     # 최대 피라미딩 횟수
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
-    "leverage":        3,     # 레버리지
+    "leverage":        5,     # 레버리지 (3→5, 2026-06-10 레버리지 스윕 검증)
     "max_hold_bars":   288,   # 최대 보유봉수 (1일)
 }
 
