@@ -495,6 +495,25 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         return state
     state["last_candle_ts"] = candle_ts
 
+    # 거래소 포지션 동기화: 봉 사이에 거래소 SL이 체결된 경우 state 업데이트
+    if state.get("position", 0) != 0 and not paper_mode:
+        try:
+            ex_pos = get_position(exchange)
+            if ex_pos["side"] is None or ex_pos["size"] == 0:
+                log.warning(f"[{coin}/AF] 거래소 포지션 없음 — SL 자동체결 감지, state 동기화")
+                state["position"]          = 0
+                state["af_trail_sl"]       = 0.0
+                state["af_registered_sl"]  = 0.0
+                state["af_peak_price"]     = 0.0
+                state["af_pyramid_count"]  = 0
+                state["af_current_rr"]     = 0.0
+                send_trade_alert(
+                    f"⚡ <b>[{coin}/AF] 거래소 SL 자동체결</b>\n"
+                    f"봉 사이에 trail_SL 도달 → 포지션 종료됨"
+                )
+        except Exception as e:
+            log.warning(f"[{coin}/AF] 포지션 동기화 조회 실패: {e}")
+
     price = float(row["close"])
     state["last_price"] = price
     state["current_bar"] += 1
