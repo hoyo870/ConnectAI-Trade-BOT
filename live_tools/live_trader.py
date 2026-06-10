@@ -507,7 +507,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 log.warning(f"[{coin}/AF] 거래소 포지션 없음 — SL 자동체결 감지, state 동기화")
 
                 exit_price  = state.get("af_trail_sl", 0.0)
-                entry_price = float(state.get("entry_price") or 0.0)
+                entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
                 entry_lev   = float(state.get("entry_lev") or 0.0)
                 entry_rr    = float(state.get("entry_rr") or 0.0)
                 pos_dir     = state["position"]
@@ -584,7 +584,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     pos = state["position"]
     if pos == 0:
         return
-    entry_price = float(state.get("entry_price") or 0.0)
+    entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
     entry_lev = float(state.get("entry_lev") or 0.0)
     entry_rr = float(state.get("entry_rr") or 0.0)
 
@@ -666,6 +666,8 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
 
     state["position"]          = 0
     state["entry_price"]       = 0.0
+    state["avg_entry_price"]   = 0.0
+    state["entry_qty"]         = 0.0
     state["entry_lev"]         = 1.0
     state["entry_rr"]          = 0.0
     state["entry_sig_long"]    = 0.0
@@ -675,6 +677,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     state["af_pyramid_count"]  = 0
     state["af_current_rr"]     = 0.0
     state["af_entry_atr"]      = 0.0
+    state["af_registered_sl"]  = 0.0
 
 
 REPORT_INTERVAL = 12   # 12 × 5분 = 1시간
@@ -860,6 +863,17 @@ def main():
                     for k, v in DEFAULT_STATE.items():
                         st.setdefault(k, copy.deepcopy(v))
                     st["peak_capital"] = max(st.get("peak_capital", st["capital"]), st["capital"])
+                    # entry_qty=0인 open 포지션 → 거래소에서 실수량 복원 (real 모드만)
+                    if mode == "real" and st.get("position", 0) != 0 and st.get("entry_qty", 0.0) == 0.0:
+                        try:
+                            os.environ["COIN"] = c
+                            ex_pos = get_position(exchange)
+                            if ex_pos["size"] > 0:
+                                st["entry_qty"]       = ex_pos["size"]
+                                st["avg_entry_price"] = ex_pos["entry_price"] or st.get("entry_price", 0.0)
+                                log.info(f"[{c}] entry_qty 마이그레이션: {ex_pos['size']} @ {st['avg_entry_price']:.4f}")
+                        except Exception as _em:
+                            log.warning(f"[{c}] entry_qty 마이그레이션 실패: {_em}")
                     all_states[c] = st
                 except Exception:
                     all_states[c] = fresh_state()
