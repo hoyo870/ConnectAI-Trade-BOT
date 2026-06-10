@@ -34,6 +34,7 @@ from exchange_client import (
     build_exchange, get_usdt_balance, get_position,
     set_leverage, place_market_order, close_position,
     fetch_ohlcv_df, calc_qty, get_symbol, get_min_qty,
+    set_position_stop_loss, cancel_position_stop_loss,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 
@@ -130,6 +131,7 @@ DEFAULT_STATE = {
     "af_pyramid_count":  0,     # 피라미딩 추가 횟수
     "af_current_rr":     0.0,   # 현재 자본 위험 비율 (피라미딩으로 증가)
     "af_entry_atr":      0.0,   # 진입 시점 ATR (피라미딩 단계 계산용)
+    "af_registered_sl":  0.0,   # 거래소에 등록된 SL 가격 (갱신 여부 판단용)
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
@@ -388,6 +390,17 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     except Exception as e:
                         log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
 
+            # trail_sl 변경 시 거래소 SL 갱신 (real 모드)
+            if not paper_mode:
+                new_sl = state["af_trail_sl"]
+                if new_sl != state.get("af_registered_sl", 0.0):
+                    try:
+                        set_position_stop_loss(exchange, new_sl)
+                        state["af_registered_sl"] = new_sl
+                        log.info(f"[{coin}/AF SL갱신] {new_sl:,.4f}")
+                    except Exception as e_sl:
+                        log.warning(f"[{coin}/AF SL갱신 실패] {e_sl}")
+
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
         long_ok  = long_ok_now
@@ -444,6 +457,13 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                                 log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
                         except Exception as e2:
                             log.warning(f"[{coin}/AF] 체결확인 실패: {e2}")
+                        # 진입 직후 거래소 SL 등록
+                        try:
+                            set_position_stop_loss(exchange, state["af_trail_sl"])
+                            state["af_registered_sl"] = state["af_trail_sl"]
+                            log.info(f"[{coin}/AF SL등록] {state['af_trail_sl']:,.4f}")
+                        except Exception as e_sl:
+                            log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
                     state["position"] = 0

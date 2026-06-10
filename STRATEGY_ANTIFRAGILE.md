@@ -288,6 +288,29 @@ python temp/scripts/38_trail_param_test.py
 
 ---
 
+## 섹션 6: Stop-Order 청산 방식 비교 (2026-06-10)
+
+> 스크립트: `temp/scripts/39_af_stop_order_bt.py`  
+> 배경: 5분봉 close 기준 trailing stop은 봉 내 급등락 시 trail_sl보다 나쁜 가격에 청산됨  
+> (SOL 22:35 사례: trail_sl=64.39, 봉 close=64.74 → 예상 손실 -0.0018 vs 실제 -0.0086, 약 5배)
+
+세 가지 청산 방식 비교 (4종목 × 2026 OOS + hist 10창):
+
+| Variant | BTC 2026 | BTC hist | ETH 2026 | ETH hist | 비고 |
+|---------|---------|---------|---------|---------|------|
+| **baseline** (close 기준) | +872% | 10/10 ✅ | +3900% | 10/10 ✅ | 현재 운용 |
+| stop_order (항상 high/low) | -36% | 4/10 ❌ | -14% | 5/10 ⚠️ | 완전 파괴 |
+| **profit_locked** (수익구간만 high/low) | +425% | 10/10 ✅ | +1625% | 10/10 ✅ | 수익 절반 |
+
+**stop_order 파괴 원인**: 봉 wick이 trail_sl 터치 시 즉시 청산 → outlier 수익 거래 조기 종료  
+**profit_locked 한계**: pass rate는 유지하나 수익 약 50% 감소 (outlier 거래 조기 청산 동일 문제)
+
+**결론**: baseline(5분봉 close 기준) 유지.  
+다만 실거래에서 gap-through 손실 최소화를 위해 **진입/trail_sl 갱신 시 거래소 position SL 등록** 추가  
+→ 봉 종가와 무관하게 trail_sl 가격에서 거래소가 직접 청산 (백테스트 결과 변화 없음)
+
+---
+
 ## 파라미터 변경 이력
 
 | 날짜 | 변경 항목 | 이전 값 | 변경 값 | 근거 |
