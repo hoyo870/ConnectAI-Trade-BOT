@@ -101,6 +101,8 @@ def _make_processes(paper: bool) -> list:
     trader_env = {
         "TRADE_MODE": os.environ.get("TRADE_MODE", "paper"),
         "EXCHANGE":   os.environ.get("EXCHANGE", "bybit"),
+        "LEVERAGE":   os.environ.get("LEVERAGE", "5"),
+        "STRATEGY":   os.environ.get("STRATEGY", "antifragile"),
     }
     trader_cmd = [sys.executable, "live_tools/live_trader.py"]
     watch_cmd  = [sys.executable, "live_tools/bot_manage.py", "watch", "--kill"]
