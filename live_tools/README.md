@@ -274,10 +274,16 @@ python live_tools/run.py                         # 시작
 ## 환경변수 (`.env` — 프로젝트 루트)
 
 ```env
-EXCHANGE=bingx              # bybit | bingx
-TRADE_MODE=real             # real | paper (run.py --paper 옵션으로 override)
+EXCHANGE=bingx              # bybit | bingx — run.py가 이 값을 읽어 하위 프로세스에 전달
+TRADE_MODE=real             # real | paper | sandbox — run.py 시작 모드 결정
+STRATEGY=antifragile        # antifragile | dl_v17
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
-BINGX_REAL_API_KEY=...
+BINGX_REAL_API_KEY=...      # EXCHANGE=bingx, TRADE_MODE=real 시 사용
 BINGX_REAL_API_SECRET=...
+# BYBIT_REAL_API_KEY=...    # EXCHANGE=bybit 시 사용
+# BYBIT_REAL_API_SECRET=...
 ```
+
+> `--paper` 플래그는 `.env`의 `TRADE_MODE`를 무시하고 paper 모드를 강제합니다.
+> 플래그 없이 실행하면 `.env`의 `TRADE_MODE` 값이 그대로 적용됩니다.

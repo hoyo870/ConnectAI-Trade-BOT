@@ -27,6 +27,21 @@ LOGS_DIR = ROOT / "logs"
 
 from flask import Flask, jsonify, request, Response
 
+
+def _load_env() -> None:
+    """프로젝트 루트 .env를 os.environ에 로드 (이미 설정된 값은 덮어쓰지 않음)."""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 
 COINS            = ["BTC", "ETH", "SOL", "XRP"]
@@ -82,7 +97,11 @@ _paper_mode = False
 def _make_processes(paper: bool) -> list:
     global _paper_mode
     _paper_mode = paper
-    trader_env = {"TRADE_MODE": "paper" if paper else "real", "EXCHANGE": "bingx"}
+    # .env에서 읽은 값을 명시적으로 하위 프로세스에 전달
+    trader_env = {
+        "TRADE_MODE": os.environ.get("TRADE_MODE", "paper"),
+        "EXCHANGE":   os.environ.get("EXCHANGE", "bingx"),
+    }
     trader_cmd = [sys.executable, "live_tools/live_trader.py"]
     watch_cmd  = [sys.executable, "live_tools/bot_manage.py", "watch", "--kill"]
     procs = [ManagedProcess("trader",   trader_cmd, restart=True)]
@@ -719,17 +738,28 @@ def _validate_real_mode_startup():
 def main():
     global _processes, _auto_restart
 
+    # .env 우선 로드 (os.environ에 없는 값만 설정)
+    _load_env()
+
     parser = argparse.ArgumentParser(description="TradeBot 통합 실행 + 대시보드")
-    parser.add_argument("--paper",           action="store_true", help="paper 모드 (실거래 없음)")
+    parser.add_argument("--paper",           action="store_true",
+                        help="paper 모드 강제 (TRADE_MODE=paper 로 override)")
     parser.add_argument("--port",            type=int, default=8765, help="대시보드 포트 (기본: 8765)")
     parser.add_argument("--no-auto-restart", action="store_true",   dest="no_restart",
                         help="자동 재시작 비활성화")
     args = parser.parse_args()
 
-    _auto_restart = not args.no_restart
-    _processes    = _make_processes(args.paper)
+    # --paper 플래그가 있으면 .env 값 무시하고 paper 강제
+    if args.paper:
+        os.environ["TRADE_MODE"] = "paper"
 
-    if not args.paper:
+    trade_mode = os.environ.get("TRADE_MODE", "paper").lower()
+    paper_mode = (trade_mode != "real")   # paper / sandbox 모두 paper_mode=True
+
+    _auto_restart = not args.no_restart
+    _processes    = _make_processes(paper_mode)
+
+    if not paper_mode:
         # state 파일 검증
         _validate_real_mode_startup()
 
@@ -753,7 +783,7 @@ def main():
     t = threading.Thread(target=_supervisor_loop, daemon=True, name="supervisor")
     t.start()
 
-    mode_str  = "PAPER" if args.paper else "REAL"
+    mode_str  = "PAPER" if paper_mode else "REAL"
     proc_list = " + ".join(p.name for p in _processes)
     print(f"\n{'='*55}")
     print(f"  TradeBot Dashboard — {mode_str} MODE")
