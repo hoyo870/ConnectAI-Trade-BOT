@@ -14,7 +14,7 @@ STRATEGY 옵션 (.env):
   nohup python live_tools/live_trader.py > logs/live.log 2>&1 &
 """
 from __future__ import annotations
-import sys, os, json, time, logging, csv, copy
+import sys, os, json, time, logging, csv, copy, fcntl
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -105,6 +105,8 @@ def load_env_file() -> None:
 DEFAULT_STATE = {
     "position":        0,       #  0=없음  1=롱  -1=숏
     "entry_price":     0.0,
+    "avg_entry_price": 0.0,
+    "entry_qty":       0.0,
     "entry_time":      None,
     "entry_lev":       1.0,
     "entry_rr":        0.0,
@@ -161,6 +163,18 @@ def fresh_state() -> dict:
     return copy.deepcopy(DEFAULT_STATE)
 
 
+def _clear_entry_fields(state: dict) -> None:
+    """진입 실패/취소 시 모든 진입·AF 관련 state 필드를 초기값으로 리셋."""
+    for key in (
+        "position", "entry_price", "avg_entry_price", "entry_qty",
+        "entry_time", "entry_lev", "entry_rr", "entry_bar",
+        "entry_sig_long", "entry_sig_short",
+        "af_trail_sl", "af_peak_price", "af_pyramid_count",
+        "af_current_rr", "af_entry_atr", "af_registered_sl",
+    ):
+        state[key] = copy.deepcopy(DEFAULT_STATE.get(key, 0))
+
+
 def get_runtime_paths(paper_mode: bool) -> dict:
     coin = os.environ.get("COIN", "BTC").lower()
     prefix = f"_{coin}" if coin != "btc" else ""  # BTC는 기존 파일명 유지
@@ -214,9 +228,26 @@ def _completed_ohlcv_df(df: pd.DataFrame, timeframe_minutes: int = 5) -> pd.Data
 
 def atomic_write_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    os.replace(tmp, path)
+    lock_path = Path(str(path) + ".lock")
+    tmp = Path(str(path) + f".{os.getpid()}.tmp")
+    payload = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(tmp, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(payload)
+                tmp_f.flush()
+                os.fsync(tmp_f.fileno())
+            os.replace(tmp, path)
+            dir_fd = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -335,7 +366,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
         if hit_stop or timeout:
             reason = "trail_SL" if hit_stop else "timeout"
-            entry_price = float(state.get("entry_price") or price)
+            entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or price)
             dir_str = "LONG 🟢" if pos == 1 else "SHORT 🔴"
             capital_before = state["capital"]
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
@@ -363,12 +394,32 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
             # 피라미딩 체크 (유리방향 N×ATR마다 추가)
             entry_atr = state.get("af_entry_atr", atr) or atr
-            favorable = pos * (price - state["entry_price"]) / (entry_atr + 1e-9)
+            base_entry = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+            favorable = pos * (price - base_entry) / (entry_atr + 1e-9)
             next_lvl  = (state["af_pyramid_count"] + 1) * p["atr_add_step"]
             if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl:
+                pyramid_snapshot = {
+                    "entry_price":       state.get("entry_price", 0.0),
+                    "avg_entry_price":   state.get("avg_entry_price", 0.0),
+                    "entry_qty":         state.get("entry_qty", 0.0),
+                    "entry_rr":          state.get("entry_rr", 0.0),
+                    "af_trail_sl":       state.get("af_trail_sl", 0.0),
+                    "af_pyramid_count":  state.get("af_pyramid_count", 0),
+                    "af_current_rr":     state.get("af_current_rr", 0.0),
+                    "af_registered_sl":  state.get("af_registered_sl", 0.0),
+                }
+                add_qty = calc_qty(state["capital"], p["rr_add"], lev, price)
                 state["af_pyramid_count"] += 1
                 state["af_current_rr"]    += p["rr_add"]
                 state["entry_rr"]          = state["af_current_rr"]
+                old_qty = float(state.get("entry_qty") or 0.0)
+                old_avg = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+                state["entry_qty"] = old_qty + add_qty
+                state["avg_entry_price"] = (
+                    ((old_avg * old_qty) + (price * add_qty)) / state["entry_qty"]
+                    if state["entry_qty"] > 0 else price
+                )
+                state["entry_price"] = state["avg_entry_price"]
                 if pos == 1:
                     state["af_trail_sl"] = max(state["af_trail_sl"], price - p["trail_atr_tight"] * atr)
                 else:
@@ -380,16 +431,18 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
                 if not paper_mode:
                     try:
-                        add_qty = calc_qty(state["capital"], p["rr_add"], lev, price)
-                        if add_qty >= MIN_QTY():
-                            side = "buy" if pos == 1 else "sell"
-                            place_market_order(exchange, side, add_qty)
-                            send_trade_alert(
-                                f"➕ <b>[{coin}/AF] 피라미딩 #{state['af_pyramid_count']}</b>\n"
-                                f"가격: {price:,.4f} | 추가수량: {add_qty}"
-                            )
+                        if add_qty < MIN_QTY():
+                            raise ValueError(f"최소수량 미달: {add_qty} < {MIN_QTY()}")
+                        side = "buy" if pos == 1 else "sell"
+                        place_market_order(exchange, side, add_qty)
                     except Exception as e:
+                        state.update(pyramid_snapshot)
                         log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
+                    else:
+                        send_trade_alert(
+                            f"➕ <b>[{coin}/AF] 피라미딩 #{state['af_pyramid_count']}</b>\n"
+                            f"가격: {price:,.4f} | 추가수량: {add_qty}"
+                        )
 
             # trail_sl 변경 시 거래소 SL 갱신 (real 모드)
             if not paper_mode:
@@ -415,6 +468,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
             state["position"]          = direction
             state["entry_price"]       = price
+            state["avg_entry_price"]   = price
+            state["entry_qty"]         = calc_qty(state["capital"], p["rr_base"], lev, price)
             state["entry_time"]        = now_str
             state["entry_lev"]         = lev
             state["entry_rr"]          = p["rr_base"]
@@ -442,7 +497,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     qty = calc_qty(state["capital"], p["rr_base"], lev, price)
                     if qty < MIN_QTY():
                         log.warning(f"[{coin}/AF] 최소수량 미달: {qty} — 진입 취소")
-                        state["position"] = 0
+                        _clear_entry_fields(state)
                     else:
                         side = "buy" if direction == 1 else "sell"
                         place_market_order(exchange, side, qty)
@@ -453,6 +508,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                                 actual_px = float(filled["entry_price"])
                                 slip_pct  = (actual_px - price) / price * 100 * direction
                                 state["entry_price"]           = actual_px
+                                state["avg_entry_price"]       = actual_px
+                                state["entry_qty"]             = float(filled.get("size") or state.get("entry_qty") or qty)
                                 state["_entry_signal_price"]   = price
                                 state["_entry_slippage_pct"]   = round(slip_pct, 4)
                                 log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
@@ -467,7 +524,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                             log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
-                    state["position"] = 0
+                    _clear_entry_fields(state)
 
     return state
 
@@ -502,7 +559,42 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
             ex_pos = get_position(exchange)
             if ex_pos["side"] is None or ex_pos["size"] == 0:
                 log.warning(f"[{coin}/AF] 거래소 포지션 없음 — SL 자동체결 감지, state 동기화")
+
+                # PnL 계산 및 로그 기록
+                exit_price = state.get("af_trail_sl", 0.0)
+                entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
+                entry_lev = float(state.get("entry_lev") or 0.0)
+                entry_rr = float(state.get("entry_rr") or 0.0)
+                pos = state["position"]
+
+                if entry_price > 0 and exit_price > 0:
+                    pnl_raw = pos * (exit_price - entry_price) / entry_price
+                    # SL 체결이므로 최대 손실은 -entry_rr로 제한
+                    pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
+                    state["capital"] *= (1 + pnl)
+                    state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
+
+                    now_str_sync = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    trade_row = {
+                        "time":               now_str_sync,
+                        "direction":          pos,
+                        "entry":              entry_price,
+                        "exit":               exit_price,
+                        "pnl":                round(pnl, 6),
+                        "capital":            round(state["capital"], 2),
+                        "forced":             False,
+                        "reason":             "EX_SL",
+                        "slippage_entry_pct": round(state.pop("_entry_slippage_pct", 0.0), 4),
+                        "slippage_exit_pct":  0.0,
+                        "exit_mark":          round(exit_price, 4),
+                    }
+                    state["trade_log"].append(trade_row)
+                    log.info(f"[{coin}/AF] SL 자동체결 PnL 계산: {pnl:+.4f}, 자본: {state['capital']:,.0f}")
+
                 state["position"]          = 0
+                state["entry_price"]       = 0.0
+                state["avg_entry_price"]   = 0.0
+                state["entry_qty"]         = 0.0
                 state["af_trail_sl"]       = 0.0
                 state["af_registered_sl"]  = 0.0
                 state["af_peak_price"]     = 0.0
@@ -510,7 +602,8 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 state["af_current_rr"]     = 0.0
                 send_trade_alert(
                     f"⚡ <b>[{coin}/AF] 거래소 SL 자동체결</b>\n"
-                    f"봉 사이에 trail_SL 도달 → 포지션 종료됨"
+                    f"봉 사이에 trail_SL 도달 → 포지션 종료됨\n"
+                    f"실행가격(추정): {exit_price:,.4f}"
                 )
         except Exception as e:
             log.warning(f"[{coin}/AF] 포지션 동기화 조회 실패: {e}")
@@ -607,7 +700,8 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
 
     # ── 미실현 equity / CB ────────────────────────────────────────────────────
     if pos != 0:
-        pnl_raw = pos * (price - state["entry_price"]) / (state["entry_price"] + 1e-9)
+        avg_entry = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+        pnl_raw = pos * (price - avg_entry) / (avg_entry + 1e-9)
         equity  = capital * (1 + pnl_raw * state["entry_lev"] * state["entry_rr"])
     else:
         equity = capital
@@ -636,7 +730,8 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
 
     # ── 청산 체크 (DL v17) ────────────────────────────────────────────────────
     if pos != 0:
-        pnl_raw  = pos * (price - state["entry_price"]) / (state["entry_price"] + 1e-9)
+        avg_entry = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+        pnl_raw  = pos * (price - avg_entry) / (avg_entry + 1e-9)
         pnl_lev  = pnl_raw * state["entry_lev"]
         hold_bars = state["current_bar"] - state["entry_bar"]
         sl_pnl   = params.get("price_sl", 0.02) * state["entry_lev"]
@@ -689,6 +784,8 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
             if paper_mode:
                 state["position"]        = direction
                 state["entry_price"]     = price
+                state["avg_entry_price"] = price
+                state["entry_qty"]       = calc_qty(capital, rr, lev_int, price)
                 state["entry_time"]      = now_str
                 state["entry_lev"]       = lev_int
                 state["entry_rr"]        = rr
@@ -713,6 +810,8 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
                         place_market_order(exchange, side, qty)
                         state["position"]        = direction
                         state["entry_price"]     = price
+                        state["avg_entry_price"] = price
+                        state["entry_qty"]       = qty
                         state["entry_time"]      = now_str
                         state["entry_lev"]       = lev_int
                         state["entry_rr"]        = rr
@@ -736,7 +835,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     pos = state["position"]
     if pos == 0:
         return
-    entry_price = float(state.get("entry_price") or 0.0)
+    entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
     entry_lev = float(state.get("entry_lev") or 0.0)
     entry_rr = float(state.get("entry_rr") or 0.0)
 
@@ -818,6 +917,8 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
 
     state["position"]          = 0
     state["entry_price"]       = 0.0
+    state["avg_entry_price"]   = 0.0
+    state["entry_qty"]         = 0.0
     state["entry_lev"]         = 1.0
     state["entry_rr"]          = 0.0
     state["entry_sig_long"]    = 0.0
@@ -851,7 +952,7 @@ def build_hourly_report(exchange, state: dict, mode: str, paper_mode: bool = Fal
         lines.append("📊 <b>포지션</b>: 없음 (관망)")
     else:
         dir_str   = "LONG 🟢" if pos == 1 else "SHORT 🔴"
-        entry     = state["entry_price"]
+        entry     = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
         if paper_mode:
             cur_price = state.get("last_price") or entry
         else:
@@ -922,7 +1023,7 @@ def build_hourly_report_multi(all_states: dict, mode: str, paper_mode: bool) -> 
         trail_str = ""
         if pos != 0:
             trail_sl  = state.get("af_trail_sl", 0)
-            entry_p   = state.get("entry_price", 0)
+            entry_p   = state.get("avg_entry_price") or state.get("entry_price", 0)
             pyr       = state.get("af_pyramid_count", 0)
             last_px   = state.get("last_price", 0)
             unreal_str = ""
@@ -1205,6 +1306,8 @@ def main():
 
         state_existed = state_file.exists()
         state = (json.loads(state_file.read_text()) if state_existed else fresh_state())
+        for k, v in DEFAULT_STATE.items():
+            state.setdefault(k, copy.deepcopy(v))
         state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
         if paper_mode and not state_existed:

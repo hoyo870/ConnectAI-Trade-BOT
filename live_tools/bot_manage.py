@@ -128,6 +128,9 @@ def cmd_init(args):
             if bal > 0:
                 seed = bal
                 print(f"  거래소 잔고 자동 조회: {bal:.2f} USDT")
+            else:
+                print(f"  {WARN} 거래소 잔고 0 — BOT_SEED/기본값 사용")
+                seed = REAL_SEED
         except Exception as _e:
             print(f"  {WARN} 거래소 조회 실패 → BOT_SEED/기본값 사용: {_e}")
             seed = REAL_SEED
@@ -200,8 +203,8 @@ def cmd_init(args):
 def cmd_preflight(args):
     from exchange_client import build_exchange, get_usdt_balance, get_position, set_leverage
 
-    exchange_name = os.environ.get("EXCHANGE", "bingx").lower()
-    fee_info      = FEE.get(exchange_name, FEE["bingx"])
+    exchange_name = os.environ.get("EXCHANGE", "bybit").lower()
+    fee_info      = FEE.get(exchange_name, FEE["bybit"])
 
     print("=" * 65)
     print(f"  실계좌 사전 검증 (Pre-flight Check)")
