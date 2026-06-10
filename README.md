@@ -1,8 +1,21 @@
-# hy-trade-bot
+# hy-trade-bot (NAS 경량화 버전)
 
 Antifragile 전략 전용 경량화 트레이딩 봇 — NAS(DS920+) Docker 배포 최적화 버전.
 
 `connectai-trade-bot`의 DL 모델(torch/SB3) 의존성을 제거하고 rule-based Antifragile 전략만 추출.
+
+---
+
+## Git 브랜치 구조
+
+```
+hoyo870/ConnectAI-Trade-BOT
+├── main          ← 풀 버전 (DL v17 + Antifragile, torch/SB3 포함)
+└── nas-deploy    ← 이 브랜치 — NAS 경량화 (Antifragile 전용, torch 없음)
+```
+
+- `main` 브랜치에서 전략 업데이트 → `nas-deploy` 브랜치에 동기화
+- NAS는 `nas-deploy` 브랜치만 pull하여 사용
 
 ---
 
@@ -29,7 +42,8 @@ Antifragile 전략 전용 경량화 트레이딩 봇 — NAS(DS920+) Docker 배�
 ### 직접 실행 (venv)
 
 ```bash
-git clone <repo-url> hy-trade-bot
+git clone -b nas-deploy --single-branch \
+  https://github.com/hoyo870/ConnectAI-Trade-BOT.git hy-trade-bot
 cd hy-trade-bot
 
 python3 -m venv venv
@@ -43,7 +57,8 @@ cp .env.example .env
 ### Docker (DS920+ 권장)
 
 ```bash
-git clone <repo-url> hy-trade-bot
+git clone -b nas-deploy --single-branch \
+  https://github.com/hoyo870/ConnectAI-Trade-BOT.git hy-trade-bot
 cd hy-trade-bot
 
 cp .env.example .env
@@ -119,7 +134,8 @@ http://NAS-IP:8765           # NAS 원격
 ```bash
 # NAS SSH
 cd /volume1/
-git clone <repo-url> hy-trade-bot
+git clone -b nas-deploy --single-branch \
+  https://github.com/hoyo870/ConnectAI-Trade-BOT.git hy-trade-bot
 cd hy-trade-bot
 cp .env.example .env
 nano .env   # API 키 입력
