@@ -735,15 +735,21 @@ def _validate_real_mode_startup():
             total += s.get("capital", 0)
         except Exception:
             missing.append(coin)
-    if missing:
-        print(f"\n[run.py] ❌ state 파일 없음: {missing}")
-        print("  먼저 실행: python live_tools/bot_manage.py init")
-        sys.exit(1)
-    if total < 100:
-        print(f"\n[run.py] ❌ 총 자본 이상: {total:.0f} USDT (최소 100 필요)")
-        print("  먼저 실행: python live_tools/bot_manage.py init")
-        sys.exit(1)
-    print(f"[run.py] ✅ 실계좌 검증 통과 | 총 트래킹 자본: {total:,.0f} USDT")
+    needs_init = bool(missing) or total <= 0
+    if needs_init:
+        if missing:
+            print(f"[run.py] state 파일 없음 {missing} → bot_manage.py init 자동 실행")
+        else:
+            print(f"[run.py] 총 자본 {total:.2f} USDT → bot_manage.py init 자동 실행")
+        result = subprocess.run(
+            [sys.executable, "live_tools/bot_manage.py", "init"],
+            cwd=str(ROOT)
+        )
+        if result.returncode != 0:
+            print("[run.py] ❌ init 실패 — 수동 확인 필요")
+            sys.exit(1)
+    else:
+        print(f"[run.py] ✅ 실계좌 검증 통과 | 총 트래킹 자본: {total:,.2f} USDT")
 
 
 # ─── 진입점 ──────────────────────────────────────────────────────────────────
