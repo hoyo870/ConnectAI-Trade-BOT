@@ -131,12 +131,20 @@ def get_position(exchange) -> dict:
 
 
 def set_leverage(exchange, leverage: int):
-    """레버리지 설정 (에러 무시 — 이미 설정된 경우)."""
+    """레버리지 설정. 성공/실패 로그 기록."""
+    import logging
+    _log = logging.getLogger(__name__)
+    coin = os.environ.get("COIN", "BTC").upper()
     try:
         params = {"category": "linear"} if exchange.id == "bybit" else {}
         exchange.set_leverage(leverage, get_symbol(), params=params)
-    except Exception:
-        pass
+        _log.info(f"[{coin}] 레버리지 설정 성공: {leverage}x")
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ["position", "no position", "102100", "110043", "same leverage"]):
+            _log.info(f"[{coin}] 레버리지 {leverage}x 유지 (이미 설정됨 또는 포지션 없음)")
+        else:
+            _log.warning(f"[{coin}] 레버리지 설정 실패: {leverage}x — {e}")
 
 
 def place_market_order(exchange, side: str, qty: float, reduce_only: bool = False) -> dict:

@@ -127,7 +127,7 @@ AF_PARAMS = {
     "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
     "add_levels":      3,     # 최대 피라미딩 횟수
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
-    "leverage":        5,     # 레버리지 (3→5, 2026-06-10 레버리지 스윕 검증)
+    "leverage":        int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
     "max_hold_bars":   288,   # 최대 보유봉수 (1일)
 }
 
