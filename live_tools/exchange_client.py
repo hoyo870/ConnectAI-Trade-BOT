@@ -28,6 +28,18 @@ _MIN_QTY_MAP = {
     "SOL": 0.1,
     "XRP": 1.0,
 }
+_TICK_SIZE_MAP = {
+    "BTC": 0.1,
+    "ETH": 0.01,
+    "SOL": 0.001,
+    "XRP": 0.0001,
+}
+
+
+def _round_to_tick(price: float, tick: float) -> float:
+    import math
+    precision = max(0, -int(math.floor(math.log10(tick))))
+    return round(round(price / tick) * tick, precision)
 
 
 def get_symbol() -> str:
@@ -56,9 +68,9 @@ def _load_env() -> dict:
 
 
 def _order_params(exchange, reduce_only: bool = False) -> dict:
-    """거래소별 주문 파라미터. Bybit은 category=linear 필요, BingX는 불필요."""
+    """거래소별 주문 파라미터. Bybit은 category=linear + positionIdx=0(one-way) 필수."""
     if exchange.id == "bybit":
-        return {"reduceOnly": reduce_only, "category": "linear"}
+        return {"reduceOnly": reduce_only, "category": "linear", "positionIdx": 0}
     return {"reduceOnly": reduce_only}
 
 
@@ -196,10 +208,12 @@ def set_position_stop_loss(exchange, trail_sl: float) -> None:
     coin = os.environ.get("COIN", "BTC").upper()
     if exchange.id == "bybit":
         symbol_raw = coin + "USDT"   # BTC/USDT:USDT → BTCUSDT
+        tick = _TICK_SIZE_MAP.get(coin, 0.01)
+        sl_price = _round_to_tick(trail_sl, tick)
         exchange.private_post_v5_position_trading_stop({
             "category":    "linear",
             "symbol":      symbol_raw,
-            "stopLoss":    str(round(trail_sl, 8)),
+            "stopLoss":    str(sl_price),
             "slTriggerBy": "MarkPrice",
             "tpslMode":    "Full",
             "positionIdx": "0",   # one-way mode 필수

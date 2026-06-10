@@ -591,15 +591,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                     state["trade_log"].append(trade_row)
                     log.info(f"[{coin}/AF] SL 자동체결 PnL 계산: {pnl:+.4f}, 자본: {state['capital']:,.0f}")
 
-                state["position"]          = 0
-                state["entry_price"]       = 0.0
-                state["avg_entry_price"]   = 0.0
-                state["entry_qty"]         = 0.0
-                state["af_trail_sl"]       = 0.0
-                state["af_registered_sl"]  = 0.0
-                state["af_peak_price"]     = 0.0
-                state["af_pyramid_count"]  = 0
-                state["af_current_rr"]     = 0.0
+                _clear_entry_fields(state)
                 send_trade_alert(
                     f"⚡ <b>[{coin}/AF] 거래소 SL 자동체결</b>\n"
                     f"봉 사이에 trail_SL 도달 → 포지션 종료됨\n"
@@ -1107,6 +1099,7 @@ def sleep_until_next_candle(on_wait_tick=None, poll_interval: float = STOP_POLL_
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 def main():
     load_env_file()
+    AF_PARAMS["leverage"] = int(os.getenv("LEVERAGE", str(AF_PARAMS["leverage"])))
     strategy   = os.environ.get("STRATEGY", "dl_v17")   # 반드시 최상단에서 정의
     trade_mode = os.getenv("TRADE_MODE", "sandbox").lower()
     paper_mode = (trade_mode == "paper")
