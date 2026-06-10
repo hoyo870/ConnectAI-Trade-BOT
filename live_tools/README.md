@@ -10,7 +10,7 @@ BTC/ETH/SOL/XRP 4종목 자동매매 봇의 실계좌 운용에 필요한 모든
 live_tools/
 ├── run.py               # ⭐ 통합 실행 + 웹 대시보드 (여기서 시작)
 ├── live_trader.py       # 봇 메인 (직접 실행 금지 — run.py가 관리)
-├── bot_manage.py        # 수동 관리 CLI (init / preflight / close / watch / fee)
+├── bot_manage.py        # 수동 관리 CLI (init / preflight / close / watch / resume / backup / fee)
 ├── exchange_client.py   # 거래소 API (BingX / Bybit)
 ├── telegram_notifier.py # 텔레그램 알림
 ├── data_pipeline.py     # 기술적 지표 계산
@@ -59,8 +59,10 @@ python live_tools/run.py --no-auto-restart  # 자동 재시작 비활성화
 | 포트폴리오 헤더 | 총 자본, 일일 PnL %, 현재 모드 |
 | 프로세스 카드 | `trader` / `watchdog` 상태, PID, 가동시간, 재시작 횟수 |
 | 시작/정지 버튼 | 각 프로세스 원클릭 제어 |
+| 긴급 청산 버튼 | **Panic: 전종목 즉시 청산** — 플래시 크래시 시 원클릭 대응 |
 | 코인별 현황 | BTC/ETH/SOL/XRP 자본 + 포지션 상태 |
 | 자본 추이 차트 | Chart.js 시계열 (trade_log 기반, 60초 갱신) |
+| 최근 거래 내역 | 최근 20건 — 진입가, 청산가, PnL, 슬리피지(%), 청산 이유 |
 | 로그 뷰어 | `logs/live_multi.log` 마지막 120줄, 5초 자동 갱신 |
 
 ### 자동 재시작 정책
@@ -85,6 +87,8 @@ run.py
     ├── GET  /api/status    프로세스 + 포트폴리오 상태 (JSON)
     ├── GET  /api/logs      로그 tail (JSON)
     ├── GET  /api/capital   코인별 자본 시계열 (JSON)
+    ├── GET  /api/trades    최근 거래 내역 20건 (슬리피지 포함, JSON)
+    ├── POST /api/emergency_close  전종목 긴급 청산 (bot_manage close --execute 호출)
     └── POST /api/action/<start|stop>/<trader|watchdog>
 ```
 
@@ -163,9 +167,12 @@ python live_tools/bot_manage.py watch --dry-run   # 1회 체크 테스트
 | 기능 | 조건 | 동작 |
 |------|------|------|
 | 포트폴리오 손실 경보 | 일일 손실 > 5% | 텔레그램 경고 |
-| 봇 자동 종료 | 손실 > 5% + `--kill` | SIGTERM |
+| 봇 자동 종료 | 손실 > 5% + `--kill` | 긴급 청산 후 SIGTERM |
 | 봇 생존 감시 | state 파일 6분 미갱신 | 텔레그램 경고 |
 | 시간 보고 | 매 1시간 | 코인별 현황 텔레그램 발송 |
+
+> 손실 계산은 **미실현 PnL 포함** — 열린 포지션의 last_price·entry_price·레버리지·RR로 추정합니다.
+> 봇 강제 종료 시 `bot_manage close --execute`를 먼저 실행해 포지션 정리 후 SIGTERM 전송합니다.
 
 ---
 
