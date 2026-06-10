@@ -177,3 +177,40 @@ def calc_qty(capital: float, entry_rr: float, leverage: float, price: float) -> 
     decimals = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
     qty = (capital * entry_rr * leverage) / price
     return round(qty, decimals)
+
+
+def set_position_stop_loss(exchange, trail_sl: float) -> None:
+    """포지션에 stop-loss 가격 등록/갱신 (real 모드 전용, paper 호출 금지).
+
+    진입·trail_sl 갱신 시 호출하면 봉 종가 체크와 무관하게
+    거래소가 trail_sl 도달 시 즉시 청산한다.
+    """
+    coin = os.environ.get("COIN", "BTC").upper()
+    if exchange.id == "bybit":
+        symbol_raw = coin + "USDT"   # BTC/USDT:USDT → BTCUSDT
+        exchange.private_post_v5_position_trading_stop({
+            "category":   "linear",
+            "symbol":     symbol_raw,
+            "stopLoss":   str(round(trail_sl, 8)),
+            "slTriggerBy": "MarkPrice",
+            "tpslMode":   "Full",
+        })
+    elif exchange.id == "bingx":
+        # BingX position-level SL은 미지원 — 무시 (봉 close 기준 fallback)
+        pass
+
+
+def cancel_position_stop_loss(exchange) -> None:
+    """포지션 stop-loss 해제 (청산 후 잔여 SL 제거용)."""
+    coin = os.environ.get("COIN", "BTC").upper()
+    if exchange.id == "bybit":
+        symbol_raw = coin + "USDT"
+        try:
+            exchange.private_post_v5_position_trading_stop({
+                "category": "linear",
+                "symbol":   symbol_raw,
+                "stopLoss": "0",        # 0 = 해제
+                "tpslMode": "Full",
+            })
+        except Exception:
+            pass  # 이미 포지션 없으면 무시

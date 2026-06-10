@@ -28,6 +28,7 @@ from exchange_client import (
     build_exchange, get_usdt_balance, get_position,
     set_leverage, place_market_order, close_position,
     fetch_ohlcv_df, calc_qty, get_symbol, get_min_qty,
+    set_position_stop_loss, cancel_position_stop_loss,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 
@@ -105,6 +106,7 @@ DEFAULT_STATE = {
     "af_pyramid_count":  0,     # 피라미딩 추가 횟수
     "af_current_rr":     0.0,   # 현재 자본 위험 비율 (피라미딩으로 증가)
     "af_entry_atr":      0.0,   # 진입 시점 ATR (피라미딩 단계 계산용)
+    "af_registered_sl":  0.0,   # 거래소에 등록된 SL 가격 (중복 갱신 방지)
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
@@ -335,6 +337,17 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     except Exception as e:
                         log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
 
+            # trail_sl 변경 시 거래소 SL 갱신 (real 모드)
+            if not paper_mode:
+                new_sl = state["af_trail_sl"]
+                if new_sl != state.get("af_registered_sl", 0.0):
+                    try:
+                        set_position_stop_loss(exchange, new_sl)
+                        state["af_registered_sl"] = new_sl
+                        log.info(f"[{coin}/AF SL갱신] {new_sl:,.4f}")
+                    except Exception as e_sl:
+                        log.warning(f"[{coin}/AF SL갱신 실패] {e_sl}")
+
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
         long_ok  = long_ok_now
@@ -391,6 +404,13 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                                 log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
                         except Exception as e2:
                             log.warning(f"[{coin}/AF] 체결확인 실패: {e2}")
+                        # 진입 직후 거래소 SL 등록
+                        try:
+                            set_position_stop_loss(exchange, state["af_trail_sl"])
+                            state["af_registered_sl"] = state["af_trail_sl"]
+                            log.info(f"[{coin}/AF SL등록] {state['af_trail_sl']:,.4f}")
+                        except Exception as e_sl:
+                            log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
                     state["position"] = 0
@@ -421,6 +441,25 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         log.info(f"[{coin}/AF 스킵] 중복 완성봉 ts={candle_ts}")
         return state
     state["last_candle_ts"] = candle_ts
+
+    # 거래소 포지션 동기화: 봉 사이에 거래소 SL이 체결된 경우 state 업데이트
+    if state.get("position", 0) != 0 and not paper_mode:
+        try:
+            ex_pos = get_position(exchange)
+            if ex_pos["side"] is None or ex_pos["size"] == 0:
+                log.warning(f"[{coin}/AF] 거래소 포지션 없음 — SL 자동체결 감지, state 동기화")
+                state["position"]          = 0
+                state["af_trail_sl"]       = 0.0
+                state["af_registered_sl"]  = 0.0
+                state["af_peak_price"]     = 0.0
+                state["af_pyramid_count"]  = 0
+                state["af_current_rr"]     = 0.0
+                send_trade_alert(
+                    f"⚡ <b>[{coin}/AF] 거래소 SL 자동체결</b>\n"
+                    f"봉 사이에 trail_SL 도달 → 포지션 종료됨"
+                )
+        except Exception as e:
+            log.warning(f"[{coin}/AF] 포지션 동기화 조회 실패: {e}")
 
     price = float(row["close"])
     state["last_price"] = price
