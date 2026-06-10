@@ -197,11 +197,12 @@ def set_position_stop_loss(exchange, trail_sl: float) -> None:
     if exchange.id == "bybit":
         symbol_raw = coin + "USDT"   # BTC/USDT:USDT → BTCUSDT
         exchange.private_post_v5_position_trading_stop({
-            "category":   "linear",
-            "symbol":     symbol_raw,
-            "stopLoss":   str(round(trail_sl, 8)),
+            "category":    "linear",
+            "symbol":      symbol_raw,
+            "stopLoss":    str(round(trail_sl, 8)),
             "slTriggerBy": "MarkPrice",
-            "tpslMode":   "Full",
+            "tpslMode":    "Full",
+            "positionIdx": "0",   # one-way mode 필수
         })
     elif exchange.id == "bingx":
         # BingX position-level SL은 미지원 — 무시 (봉 close 기준 fallback)
@@ -215,10 +216,11 @@ def cancel_position_stop_loss(exchange) -> None:
         symbol_raw = coin + "USDT"
         try:
             exchange.private_post_v5_position_trading_stop({
-                "category": "linear",
-                "symbol":   symbol_raw,
-                "stopLoss": "0",        # 0 = 해제
-                "tpslMode": "Full",
+                "category":    "linear",
+                "symbol":      symbol_raw,
+                "stopLoss":    "0",        # 0 = 해제
+                "tpslMode":    "Full",
+                "positionIdx": "0",        # one-way mode 필수
             })
         except Exception:
             pass  # 이미 포지션 없으면 무시
