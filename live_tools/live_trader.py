@@ -928,6 +928,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     state["af_pyramid_count"]  = 0
     state["af_current_rr"]     = 0.0
     state["af_entry_atr"]      = 0.0
+    state["af_registered_sl"]  = 0.0
 
 
 REPORT_INTERVAL = 12   # 12 × 5분 = 1시간
@@ -1185,6 +1186,17 @@ def main():
                     for k, v in DEFAULT_STATE.items():
                         st.setdefault(k, copy.deepcopy(v))
                     st["peak_capital"] = max(st.get("peak_capital", st["capital"]), st["capital"])
+                    # entry_qty=0인 open 포지션 → 거래소에서 실수량 복원 (real 모드만)
+                    if mode == "real" and st.get("position", 0) != 0 and st.get("entry_qty", 0.0) == 0.0:
+                        try:
+                            os.environ["COIN"] = c
+                            ex_pos = get_position(exchange)
+                            if ex_pos["size"] > 0:
+                                st["entry_qty"]       = ex_pos["size"]
+                                st["avg_entry_price"] = ex_pos["entry_price"] or st.get("entry_price", 0.0)
+                                log.info(f"[{c}] entry_qty 마이그레이션: {ex_pos['size']} @ {st['avg_entry_price']:.4f}")
+                        except Exception as _em:
+                            log.warning(f"[{c}] entry_qty 마이그레이션 실패: {_em}")
                     all_states[c] = st
                 except Exception:
                     all_states[c] = fresh_state()
