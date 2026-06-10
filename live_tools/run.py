@@ -100,7 +100,7 @@ def _make_processes(paper: bool) -> list:
     # .env에서 읽은 값을 명시적으로 하위 프로세스에 전달
     trader_env = {
         "TRADE_MODE": os.environ.get("TRADE_MODE", "paper"),
-        "EXCHANGE":   os.environ.get("EXCHANGE", "bingx"),
+        "EXCHANGE":   os.environ.get("EXCHANGE", "bybit"),
     }
     trader_cmd = [sys.executable, "live_tools/live_trader.py"]
     watch_cmd  = [sys.executable, "live_tools/bot_manage.py", "watch", "--kill"]
@@ -577,7 +577,7 @@ async function updateStatus() {
     const pnl = d.portfolio.daily_pnl_pct;
     const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400';
     document.getElementById('mode-badge').textContent =
-      (d.mode === 'paper' ? '📝 PAPER MODE' : '🔴 REAL MODE') + '  |  ' + (d.exchange || 'bingx').toUpperCase();
+      (d.mode === 'paper' ? '📝 PAPER MODE' : '🔴 REAL MODE') + '  |  ' + (d.exchange || 'bybit').toUpperCase();
     document.getElementById('total-capital').textContent = '$' + d.portfolio.total_capital.toLocaleString();
     document.getElementById('daily-pnl').innerHTML =
       `<span class="${pnlColor}">일일 ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
