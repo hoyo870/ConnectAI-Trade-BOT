@@ -232,6 +232,26 @@ def set_position_stop_loss(exchange, trail_sl: float) -> None:
         pass
 
 
+def get_last_closed_price(exchange) -> float:
+    """Bybit V5 최근 청산 포지션의 실체결가(avgExitPrice) 조회."""
+    if exchange.id != "bybit":
+        return 0.0
+    coin = os.environ.get("COIN", "BTC").upper()
+    symbol_raw = coin + "USDT"
+    try:
+        result = exchange.private_get_v5_position_closed_pnl({
+            "category": "linear",
+            "symbol":   symbol_raw,
+            "limit":    "1",
+        })
+        entries = (result.get("result") or {}).get("list", [])
+        if entries:
+            return float(entries[0].get("avgExitPrice") or 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
 def cancel_position_stop_loss(exchange) -> None:
     """포지션 stop-loss 해제 (청산 후 잔여 SL 제거용)."""
     coin = os.environ.get("COIN", "BTC").upper()

@@ -29,6 +29,7 @@ from exchange_client import (
     set_leverage, place_market_order, close_position,
     fetch_ohlcv_df, calc_qty, get_symbol, get_min_qty,
     set_position_stop_loss, cancel_position_stop_loss,
+    get_last_closed_price,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 
@@ -307,12 +308,13 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     if pos != 0:
         trail_sl  = state["af_trail_sl"]
         hold_bars = state["current_bar"] - state["entry_bar"]
-        hit_stop  = (pos ==  1 and price <= trail_sl) or \
-                    (pos == -1 and price >= trail_sl)
-        timeout   = hold_bars >= p["max_hold_bars"]
+        hit_stop   = (pos ==  1 and price <= trail_sl) or \
+                     (pos == -1 and price >= trail_sl)
+        timeout    = hold_bars >= p["max_hold_bars"]
+        trend_rev  = (pos == -1 and trend_up) or (pos == 1 and trend_down)
 
-        if hit_stop or timeout:
-            reason = "trail_SL" if hit_stop else "timeout"
+        if hit_stop or timeout or trend_rev:
+            reason = "trail_SL" if hit_stop else ("timeout" if timeout else "TREND_REV")
             entry_price = float(state.get("entry_price") or price)
             dir_str = "LONG 🟢" if pos == 1 else "SHORT 🔴"
             capital_before = state["capital"]
@@ -516,11 +518,17 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
             if ex_pos["side"] is None or ex_pos["size"] == 0:
                 log.warning(f"[{coin}/AF] 거래소 포지션 없음 — SL 자동체결 감지, state 동기화")
 
-                exit_price  = state.get("af_trail_sl", 0.0)
+                actual_exit = get_last_closed_price(exchange)
+                sl_estimate = state.get("af_trail_sl", 0.0)
+                exit_price  = actual_exit if actual_exit > 0 else sl_estimate
                 entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or 0.0)
                 entry_lev   = float(state.get("entry_lev") or 0.0)
                 entry_rr    = float(state.get("entry_rr") or 0.0)
                 pos_dir     = state["position"]
+
+                slip_exit_pct = 0.0
+                if sl_estimate > 0 and actual_exit > 0:
+                    slip_exit_pct = round((actual_exit - sl_estimate) / sl_estimate * 100 * pos_dir * -1, 4)
 
                 if entry_price > 0 and exit_price > 0:
                     pnl_raw = pos_dir * (exit_price - entry_price) / entry_price
@@ -538,10 +546,11 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                         "forced":             False,
                         "reason":             "EX_SL",
                         "slippage_entry_pct": round(state.pop("_entry_slippage_pct", 0.0), 4),
-                        "slippage_exit_pct":  0.0,
+                        "slippage_exit_pct":  slip_exit_pct,
                         "exit_mark":          round(exit_price, 4),
                     })
-                    log.info(f"[{coin}/AF] SL 자동체결 PnL: {pnl:+.4f}, 자본: {state['capital']:,.2f}")
+                    src = "실체결" if actual_exit > 0 else "trail_sl추정"
+                    log.info(f"[{coin}/AF] SL 자동체결({src}) exit={exit_price:.4f} PnL: {pnl:+.4f}, 자본: {state['capital']:,.2f}")
 
                 _clear_entry_fields(state)
                 send_trade_alert(
@@ -601,9 +610,15 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
             close_position(exchange, ex_pos)
             time.sleep(1)
             try:
+                actual_fill = get_last_closed_price(exchange)
+                if actual_fill > 0:
+                    mark_px = actual_fill
+            except Exception:
+                pass
+            try:
                 ex_after = get_position(exchange)
                 if ex_after["side"] is None or ex_after["size"] == 0:
-                    log.info(f"[청산확인] 포지션 정상 청산")
+                    log.info(f"[청산확인] 포지션 정상 청산 실체결={mark_px:.4f}")
                 else:
                     log.warning(f"[청산경고] 잔여포지션: side={ex_after['side']} size={ex_after['size']}")
             except Exception as e2:
