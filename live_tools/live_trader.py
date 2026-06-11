@@ -285,6 +285,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     pos     = state["position"]
     lev     = p["leverage"]
     trend_str = "DN" if trend_down else ("UP" if trend_up else "RG")
+    prev_trend = state.get("last_trend", trend_str)
+    state["last_trend"] = trend_str
     long_ok_now = rsi <= rsi_lo
     short_ok_now = rsi >= rsi_hi and not long_ok_now
     candle_ts = df.index[-1] if len(df.index) else "n/a"
@@ -405,8 +407,11 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
-        long_ok  = long_ok_now
-        short_ok = short_ok_now
+        trend_stable = (prev_trend == trend_str)
+        if not trend_stable and (long_ok_now or short_ok_now):
+            log.info(f"[{coin}/AF 진입 스킵] 트렌드 첫 전환 봉 {prev_trend}→{trend_str} — 안정화 대기")
+        long_ok  = long_ok_now and trend_stable
+        short_ok = short_ok_now and trend_stable
 
         direction = 1 if long_ok else (-1 if short_ok else 0)
         if direction != 0:
