@@ -874,8 +874,10 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     entry_rr = float(state.get("entry_rr") or 0.0)
 
     mark_px = price
+    balance_before = 0.0
     if not paper_mode:
         try:
+            balance_before = get_usdt_balance(exchange)
             ex_pos = get_position(exchange)
             if entry_price <= 0 and float(ex_pos.get("entry_price") or 0.0) > 0:
                 entry_price = float(ex_pos["entry_price"])
@@ -908,22 +910,35 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     if entry_price <= 0 or entry_lev <= 0 or entry_rr <= 0:
         log.error(
             f"[청산 PnL 오류] invalid entry state: entry={entry_price}, "
-            f"lev={entry_lev}, rr={entry_rr}, exit={price}, pos={pos}"
+            f"lev={entry_lev}, rr={entry_rr}, exit={mark_px}, pos={pos}"
         )
         pnl_raw = 0.0
         pnl = 0.0
     else:
-        pnl_raw = pos * (price - entry_price) / entry_price
+        pnl_raw = pos * (mark_px - entry_price) / entry_price  # 신호가 아닌 실체결가 사용
         pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
     hold_bars = state["current_bar"] - state["entry_bar"]
+    capital_before = state["capital"]
     state["capital"] *= (1 + pnl)
+
+    # 실잔고 델타로 자본 동기화 (펀딩피·수수료 오차 흡수)
+    if not paper_mode and balance_before > 0:
+        try:
+            balance_after = get_usdt_balance(exchange)
+            if balance_after > 0:
+                actual_pnl_usdt = balance_after - balance_before
+                state["capital"] = capital_before + actual_pnl_usdt
+                log.info(f"[자본 동기화] 계산={capital_before*(1+pnl):,.2f} → 실잔고={state['capital']:,.2f} USDT")
+        except Exception:
+            pass  # 조회 실패 시 계산값 유지
+
     state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
     trade_row = {
         "time":               now_str,
         "direction":          pos,
         "entry":              entry_price,
-        "exit":               price,
+        "exit":               round(mark_px, 6),  # 실체결가 기록
         "pnl":                round(pnl, 6),
         "capital":            round(state["capital"], 2),
         "forced":             forced,
