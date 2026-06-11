@@ -496,6 +496,17 @@ _HTML = """<!DOCTYPE html>
 const COIN_COLORS = {BTC:'#f59e0b', ETH:'#6366f1', SOL:'#10b981', XRP:'#3b82f6'};
 let chart = null;
 
+function toKST(utcStr) {
+  if (!utcStr || utcStr === '-') return '-';
+  try {
+    const d = new Date(utcStr.replace(' UTC','').replace(' ','T') + 'Z');
+    return d.toLocaleString('ko-KR', {
+      timeZone:'Asia/Seoul', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', hour12:false
+    }) + ' KST';
+  } catch(e) { return utcStr; }
+}
+
 // ─── Chart 초기화 ──────────────────────────────────────────────────────
 function initChart() {
   const ctx = document.getElementById('capitalChart').getContext('2d');
@@ -565,7 +576,7 @@ function renderCoins(coins) {
     return `<div class="py-1 border-b border-slate-800 last:border-0">
       <div class="flex justify-between text-sm">
         <span style="color:${COIN_COLORS[c]||'#94a3b8'}">${c}${dot}</span>
-        <span>$${s.capital.toFixed(0)}</span>
+        <span>$${s.capital.toFixed(2)}</span>
         <span class="text-slate-400 text-xs">${posStr}</span>
       </div>${posDetail}
     </div>`;
@@ -583,7 +594,8 @@ async function updateStatus() {
     document.getElementById('total-capital').textContent = '$' + d.portfolio.total_capital.toLocaleString();
     document.getElementById('daily-pnl').innerHTML =
       `<span class="${pnlColor}">일일 ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
-    document.getElementById('last-update').textContent = d.ts;
+    document.getElementById('last-update').textContent =
+      new Date().toLocaleTimeString('ko-KR', {timeZone:'Asia/Seoul', hour12:false}) + ' KST';
     renderProcesses(d.processes);
     renderCoins(d.coins);
   } catch(e) { console.warn('status err', e); }
@@ -599,7 +611,7 @@ async function updateChart() {
       .filter(([,pts]) => pts.length > 1)
       .map(([coin, pts]) => ({
         label: coin,
-        data: pts.map(p => ({ x: new Date(p.t.replace(' UTC','')), y: p.v })),
+        data: pts.map(p => ({ x: new Date(p.t.replace(' UTC','').replace(' ','T')+'Z'), y: p.v })),
         borderColor: COIN_COLORS[coin] || '#94a3b8',
         backgroundColor: 'transparent',
         borderWidth: 2,
@@ -654,21 +666,25 @@ async function updateTrades() {
       const pc = pnl >= 0 ? 'text-green-400' : 'text-red-400';
       const dir = t.direction === 1 ? '🟢 LONG' : '🔴 SHORT';
       const slip = t.slippage_exit_pct != null ? (t.slippage_exit_pct >= 0 ? '+' : '') + t.slippage_exit_pct.toFixed(3) + '%' : '-';
+      const capAfter = t.capital || 0;
+      const capBefore = (1 + pnl) !== 0 ? capAfter / (1 + pnl) : capAfter;
+      const pnlUsdt = capAfter - capBefore;
+      const pnlSign = pnl >= 0 ? '+' : '';
       return `<tr class="border-b border-slate-800">
-        <td class="py-1 px-2 text-xs text-slate-400">${t.time||'-'}</td>
+        <td class="py-1 px-2 text-xs text-slate-400">${toKST(t.time||'-')}</td>
         <td class="py-1 px-2 text-xs" style="color:${COIN_COLORS[t.coin]||'#94a3b8'}">${t.coin}</td>
         <td class="py-1 px-2 text-xs">${dir}</td>
         <td class="py-1 px-2 text-xs font-mono">${(t.entry||0).toLocaleString()}</td>
         <td class="py-1 px-2 text-xs font-mono">${(t.exit||0).toLocaleString()}</td>
-        <td class="py-1 px-2 text-xs font-mono ${pc}">${(pnl*100).toFixed(2)}%</td>
+        <td class="py-1 px-2 text-xs font-mono ${pc}">${pnlSign}$${pnlUsdt.toFixed(2)}<span class="text-slate-500 ml-1">(${pnlSign}${(pnl*100).toFixed(2)}%)</span></td>
         <td class="py-1 px-2 text-xs text-slate-400">${slip}</td>
         <td class="py-1 px-2 text-xs text-slate-400">${t.reason||'-'}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `<table class="w-full text-left"><thead><tr class="text-slate-500 text-xs uppercase">
-      <th class="py-1 px-2">시각</th><th class="py-1 px-2">코인</th><th class="py-1 px-2">방향</th>
+      <th class="py-1 px-2">시각(KST)</th><th class="py-1 px-2">코인</th><th class="py-1 px-2">방향</th>
       <th class="py-1 px-2">진입가</th><th class="py-1 px-2">청산가</th>
-      <th class="py-1 px-2">PnL</th><th class="py-1 px-2">슬리피지</th><th class="py-1 px-2">이유</th>
+      <th class="py-1 px-2">PnL(USDT/%)</th><th class="py-1 px-2">슬리피지</th><th class="py-1 px-2">이유</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
   } catch(e) { console.warn('trades err', e); }
 }
@@ -723,7 +739,7 @@ def _shutdown(sig=None, frame=None):
 
 def _auto_init_if_needed():
     """state 파일 없거나 자본 0이면 bot_manage.py init 자동 실행."""
-    import json
+    import json, subprocess
     sfx_map = {"BTC": "", "ETH": "_eth", "SOL": "_sol", "XRP": "_xrp"}
     total = 0.0
     missing = []
