@@ -115,15 +115,14 @@ DEFAULT_STATE = {
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
 # 검증: BTC 9/10 +419%/3개월, ETH 10/10 +678%, SOL 10/10 +2944%, XRP 10/10 +10985%
-# 2026-06-10: ut_rsi_lo 35→40, ut_rsi_hi 78→85 (E.UT-NoShrt, 4종목 전수 개선)
-# 2026-06-10: leverage 3→5 (레버리지 스윕 — 4종목 hist 9~10/10 유지, MDD ≤5.6%)
+# 기본값 (AF_PARAM_PRESET 미설정 시 사용)
 AF_PARAMS = {
     "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
     "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
     "rg_rsi_lo":       30,    # 횡보:     롱 진입 RSI 임계값
     "rg_rsi_hi":       70,    # 횡보:     숏 진입 RSI 임계값
-    "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값 (35→40, 상승장 롱 완화)
-    "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값 (78→85, 상승장 숏 억제)
+    "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값
+    "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값
     "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
     "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.10,  # 초기 자본 위험 비율
@@ -132,6 +131,27 @@ AF_PARAMS = {
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
     "leverage":        int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
     "max_hold_bars":   288,   # 최대 보유봉수 (1일)
+}
+
+# ── 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) ───────────────────────────
+# 스윕 검증: temp/PARAM_SWEEP_LOG.md (2026-06-11)
+_AF_PRESETS: dict[str, dict] = {
+    # stable: R1+S2+P4 — TPD≈8.6, MDD≈3.3%, hist BTC 10/10
+    "stable": {
+        "dt_rsi_lo": 25, "dt_rsi_hi": 65,
+        "rg_rsi_lo": 30, "rg_rsi_hi": 70,
+        "ut_rsi_lo": 38, "ut_rsi_hi": 75,
+        "trail_atr_init": 1.0, "trail_atr_tight": 1.2,
+        "add_levels": 4,
+    },
+    # aggressive: R2+S2+P4 — TPD≈13.2, MDD≈4.1%, hist BTC 10/10
+    "aggressive": {
+        "dt_rsi_lo": 28, "dt_rsi_hi": 62,
+        "rg_rsi_lo": 32, "rg_rsi_hi": 68,
+        "ut_rsi_lo": 40, "ut_rsi_hi": 72,
+        "trail_atr_init": 1.0, "trail_atr_tight": 1.2,
+        "add_levels": 4,
+    },
 }
 
 
@@ -805,6 +825,10 @@ def sleep_until_next_candle(on_wait_tick=None, poll_interval: float = STOP_POLL_
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 def main():
     load_env_file()
+    preset_name = os.getenv("AF_PARAM_PRESET", "").lower()
+    if preset_name in _AF_PRESETS:
+        AF_PARAMS.update(_AF_PRESETS[preset_name])
+        log.info(f"[AF] 프리셋 적용: {preset_name}")
     AF_PARAMS["leverage"] = int(os.getenv("LEVERAGE", str(AF_PARAMS["leverage"])))
     strategy   = os.environ.get("STRATEGY", "antifragile")   # hy-trade-bot은 AF 전용
     trade_mode = os.getenv("TRADE_MODE", "sandbox").lower()
