@@ -338,6 +338,7 @@ def api_status():
         "coins":     coins,
         "mode":      "paper" if _paper_mode else "real",
         "exchange":  os.environ.get("EXCHANGE", "bingx").lower(),
+        "leverage":  int(os.environ.get("LEVERAGE", "5")),
         "ts":        datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     })
 
@@ -416,85 +417,177 @@ _HTML = """<!DOCTYPE html>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  body { background: #0f172a; color: #e2e8f0; font-family: 'Courier New', monospace; }
-  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.2rem; }
-  .log-box { background: #020617; color: #4ade80; font-size: 0.72rem;
-             height: 260px; overflow-y: auto; padding: 0.75rem;
+  :root {
+    --bg:      #020617;
+    --surface: #0d1526;
+    --card:    #0d1526;
+    --border:  #1e293b;
+    --border2: #334155;
+    --text:    #f1f5f9;
+    --muted:   #94a3b8;
+    --dim:     #475569;
+    --accent:  #38bdf8;
+    --up:      #10b981;
+    --down:    #f43f5e;
+    --warn:    #f59e0b;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', 'Courier New', sans-serif; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; }
+  .label { font-size: 0.68rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .kpi-val { font-size: 1.4rem; font-weight: 700; line-height: 1.2; }
+  .log-box { background: #000d1a; color: #22d3ee; font-size: 0.68rem; font-family: 'Courier New', monospace;
+             height: 200px; overflow-y: auto; padding: 0.75rem;
              border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
-  .badge-up   { background:#166534; color:#4ade80; }
-  .badge-down { background:#7f1d1d; color:#f87171; }
-  .badge-halt { background:#78350f; color:#fbbf24; }
-  .badge-loop { background:#581c87; color:#d8b4fe; }
-  .badge { padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; }
-  canvas { max-height: 260px; }
+  .badge-up   { background: rgba(16,185,129,.15); color: #10b981; border: 1px solid rgba(16,185,129,.35); }
+  .badge-down { background: rgba(244,63,94,.15);  color: #f43f5e; border: 1px solid rgba(244,63,94,.35); }
+  .badge-halt { background: rgba(245,158,11,.15); color: #f59e0b; border: 1px solid rgba(245,158,11,.35); }
+  .badge-loop { background: rgba(139,92,246,.15); color: #a78bfa; border: 1px solid rgba(139,92,246,.35); }
+  .badge { padding: 2px 10px; border-radius: 20px; font-size: 0.7rem; font-weight: 700; }
+  .modal-wrap {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center; padding: 1rem;
+    background: rgba(2,6,23,.9); backdrop-filter: blur(6px);
+  }
+  .modal-box {
+    background: #0d1526; border: 1px solid var(--border2); border-radius: 18px; padding: 1.5rem;
+    width: 100%; max-height: calc(100vh - 2rem); overflow-y: auto;
+    box-shadow: 0 30px 80px rgba(0,0,0,.7);
+  }
+  #capitalChart { width: 100% !important; height: 420px !important; }
 </style>
 </head>
-<body class="min-h-screen p-4">
+<body class="min-h-screen p-4 md:p-6">
 
 <!-- 헤더 -->
-<div class="flex justify-between items-center mb-5 pb-4 border-b border-slate-700">
+<div class="flex flex-wrap justify-between items-start gap-4 mb-6 pb-5 border-b border-slate-800">
   <div>
-    <h1 class="text-xl font-bold text-blue-400">ConnectAI TradeBot</h1>
-    <div id="mode-badge" class="text-xs text-slate-400 mt-1">로딩 중...</div>
+    <h1 class="text-lg font-bold" style="color:var(--accent)">ConnectAI TradeBot</h1>
+    <div id="mode-badge" class="text-xs mt-1" style="color:var(--muted)">로딩 중...</div>
   </div>
-  <div class="text-right">
-    <div class="text-slate-400 text-xs mb-1">총 자본</div>
-    <div id="total-capital" class="text-2xl font-bold text-green-400">-</div>
-    <div id="daily-pnl" class="text-sm mt-0.5">-</div>
-    <div id="last-update" class="text-slate-500 text-xs mt-1">-</div>
+  <div class="flex items-start gap-6">
+    <div class="text-right">
+      <div class="label mb-1">총 자본</div>
+      <div id="total-capital" class="text-2xl font-bold" style="color:var(--up)">-</div>
+      <div id="daily-pnl" class="text-sm mt-0.5">-</div>
+      <div id="last-update" class="text-xs mt-1" style="color:var(--dim)">-</div>
+    </div>
+    <div class="flex flex-col gap-2 pt-1">
+      <button onclick="openModal('capital-modal')"
+        class="px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
+        style="background:rgba(56,189,248,.12);color:var(--accent);border:1px solid rgba(56,189,248,.3)">
+        📈 자본 추이
+      </button>
+      <button onclick="openModal('trades-modal')"
+        class="px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
+        style="background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border2)">
+        📋 최근 거래
+      </button>
+    </div>
   </div>
 </div>
 
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
 
-  <!-- 왼쪽: 프로세스 + 코인 상태 -->
-  <div class="space-y-4">
-    <div class="card">
-      <div class="text-slate-400 text-xs font-bold mb-3 uppercase tracking-wide">프로세스</div>
-      <div id="process-cards" class="space-y-3"><!-- JS --></div>
-      <button onclick="emergencyClose()"
-        class="w-full mt-3 py-2 rounded-lg bg-red-800 hover:bg-red-700 text-red-200 font-bold text-sm border border-red-600">
-        🚨 Emergency Close All
-      </button>
-    </div>
-    <div class="card">
-      <div class="text-slate-400 text-xs font-bold mb-3 uppercase tracking-wide">코인 현황</div>
-      <div id="coin-cards" class="space-y-2"><!-- JS --></div>
-    </div>
+  <!-- 프로세스 -->
+  <div class="lg:col-span-4 card">
+    <div class="label mb-3">프로세스</div>
+    <div id="process-cards" class="space-y-2"><!-- JS --></div>
+    <button onclick="emergencyClose()"
+      class="w-full mt-3 py-2 rounded-lg font-bold text-sm transition-colors"
+      style="background:rgba(244,63,94,.1);color:#f43f5e;border:1px solid rgba(244,63,94,.3)">
+      🚨 Emergency Close All
+    </button>
   </div>
 
-  <!-- 오른쪽: 자본 차트 -->
-  <div class="lg:col-span-2 card">
-    <div class="text-slate-400 text-xs font-bold mb-3 uppercase tracking-wide">자본 추이</div>
-    <canvas id="capitalChart"></canvas>
+  <!-- 코인 현황 -->
+  <div class="lg:col-span-4 card">
+    <div class="label mb-3">코인 현황</div>
+    <div id="coin-cards" class="space-y-1"><!-- JS --></div>
+  </div>
+
+  <!-- KPI + 빠른 보기 -->
+  <div class="lg:col-span-4 flex flex-col gap-4">
+    <div class="card flex-1">
+      <div class="label mb-4">포트폴리오 요약</div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <div class="label mb-1">활성 포지션</div>
+          <div id="kpi-positions" class="kpi-val" style="color:var(--accent)">-</div>
+        </div>
+        <div>
+          <div class="label mb-1">레버리지</div>
+          <div id="kpi-leverage" class="kpi-val" style="color:var(--warn)">-</div>
+        </div>
+      </div>
+      <div class="mt-4 pt-3" style="border-top:1px solid var(--border)">
+        <button onclick="openModal('capital-modal')"
+          class="w-full py-2.5 rounded-xl text-sm font-semibold mb-2 transition-colors"
+          style="background:rgba(56,189,248,.1);color:var(--accent);border:1px solid rgba(56,189,248,.25)">
+          📈 자본 추이
+        </button>
+        <button onclick="openModal('trades-modal')"
+          class="w-full py-2.5 rounded-xl text-sm font-semibold transition-colors"
+          style="background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border2)">
+          📋 최근 거래
+        </button>
+      </div>
+    </div>
   </div>
 
   <!-- 로그 (전체 너비) -->
-  <div class="lg:col-span-3 card">
+  <div class="lg:col-span-12 card">
     <div class="flex justify-between items-center mb-3">
-      <div class="text-slate-400 text-xs font-bold uppercase tracking-wide">로그</div>
-      <div class="flex gap-2 items-center">
-        <label class="text-slate-500 text-xs">
+      <div class="label">로그</div>
+      <div class="flex gap-3 items-center">
+        <label style="font-size:.72rem;color:var(--muted);cursor:pointer">
           <input type="checkbox" id="auto-scroll" checked class="mr-1">자동 스크롤
         </label>
-        <span class="text-slate-600 text-xs" id="log-update">-</span>
+        <span style="font-size:.7rem;color:var(--dim)" id="log-update">-</span>
       </div>
     </div>
     <div class="log-box" id="log-box">로딩 중...</div>
   </div>
 
-  <!-- 최근 거래 (전체 너비) -->
-  <div class="lg:col-span-3 card">
-    <div class="text-slate-400 text-xs font-bold mb-3 uppercase tracking-wide">최근 거래</div>
+</div>
+
+<!-- 자본 추이 모달 -->
+<div id="capital-modal" class="modal-wrap hidden" role="dialog" aria-modal="true"
+     onclick="if(event.target===this)closeModal('capital-modal')">
+  <div class="modal-box" style="max-width:900px" onclick="event.stopPropagation()">
+    <div class="flex items-center justify-between mb-5">
+      <div class="font-semibold text-sm" style="color:var(--accent)">📈 자본 추이</div>
+      <button onclick="closeModal('capital-modal')"
+        class="text-xs px-3 py-1.5 rounded-lg transition-colors"
+        style="background:var(--border);color:var(--muted)">✕ 닫기</button>
+    </div>
+    <div style="height:420px">
+      <canvas id="capitalChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- 최근 거래 모달 -->
+<div id="trades-modal" class="modal-wrap hidden" role="dialog" aria-modal="true"
+     onclick="if(event.target===this)closeModal('trades-modal')">
+  <div class="modal-box" style="max-width:1100px" onclick="event.stopPropagation()">
+    <div class="flex items-center justify-between mb-5">
+      <div class="font-semibold text-sm" style="color:var(--text)">📋 최근 거래</div>
+      <button onclick="closeModal('trades-modal')"
+        class="text-xs px-3 py-1.5 rounded-lg transition-colors"
+        style="background:var(--border);color:var(--muted)">✕ 닫기</button>
+    </div>
     <div id="trades-table" class="overflow-x-auto">로딩 중...</div>
   </div>
-
 </div>
 
 <script>
 const COIN_COLORS = {BTC:'#f59e0b', ETH:'#6366f1', SOL:'#10b981', XRP:'#3b82f6'};
 let chart = null;
+let lastCapitalSeries = null;
 
 function toKST(utcStr) {
   if (!utcStr || utcStr === '-') return '-';
@@ -507,14 +600,57 @@ function toKST(utcStr) {
   } catch(e) { return utcStr; }
 }
 
+// ─── 모달 열기/닫기 ─────────────────────────────────────────────────────
+function openModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  if (id === 'capital-modal') {
+    requestAnimationFrame(() => {
+      if (lastCapitalSeries) renderChart(lastCapitalSeries);
+      else updateChart();
+    });
+  }
+  if (id === 'trades-modal') updateTrades();
+}
+
+function closeModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.classList.add('hidden');
+  if (!document.querySelector('.modal-wrap:not(.hidden)'))
+    document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  closeModal('capital-modal');
+  closeModal('trades-modal');
+});
+
 // ─── Chart 초기화 ──────────────────────────────────────────────────────
-function initChart() {
+function renderChart(series) {
   const ctx = document.getElementById('capitalChart').getContext('2d');
+  if (chart) chart.destroy();
   chart = new Chart(ctx, {
     type: 'line',
-    data: { datasets: [] },
+    data: {
+      datasets: Object.entries(series)
+        .filter(([,pts]) => pts.length > 1)
+        .map(([coin, pts]) => ({
+          label: coin,
+          data: pts.map(p => ({ x: new Date(p.t.replace(' UTC','').replace(' ','T')+'Z'), y: p.v })),
+          borderColor: COIN_COLORS[coin] || '#94a3b8',
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: 2,
+          tension: 0.3,
+        }))
+    },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: { legend: { labels: { color:'#94a3b8', font:{size:11} } } },
       scales: {
@@ -525,6 +661,7 @@ function initChart() {
       }
     }
   });
+  chart.resize();
 }
 
 // ─── 상태 업데이트 ─────────────────────────────────────────────────────
@@ -564,21 +701,25 @@ function renderProcesses(procs) {
 function renderCoins(coins) {
   const el = document.getElementById('coin-cards');
   el.innerHTML = Object.entries(coins).map(([c,s]) => {
-    const posStr = s.position === 0 ? '없음' : (s.position === 1 ? 'LONG 🟢' : 'SHORT 🔴');
-    const dot = s.daily_halt ? ' 🔴' : '';
-    const posDetail = s.position !== 0 && s.entry_price > 0
-      ? `<div class="text-xs text-slate-500 mt-0.5 pl-1">
-           진입 <span class="text-slate-300">${s.entry_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}</span>
-           &nbsp;|&nbsp;
-           Trail <span class="text-yellow-400">${s.trail_sl > 0 ? s.trail_sl.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4}) : '-'}</span>
+    const isLong  = s.position === 1;
+    const isShort = s.position === -1;
+    const posLabel = s.position === 0 ? '<span style="color:var(--dim)">대기</span>'
+                   : isLong  ? '<span style="color:var(--up);font-weight:600">LONG ▲</span>'
+                              : '<span style="color:var(--down);font-weight:600">SHORT ▼</span>';
+    const halt = s.daily_halt ? '<span style="color:var(--down)" title="일일 한도 초과">⬤</span> ' : '';
+    const detail = s.position !== 0 && s.entry_price > 0
+      ? `<div style="font-size:.68rem;color:var(--dim);margin-top:3px;padding-left:2px">
+           진입 <span style="color:var(--muted)">${s.entry_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}</span>
+           &nbsp;·&nbsp;
+           Trail <span style="color:var(--warn)">${s.trail_sl > 0 ? s.trail_sl.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4}) : '-'}</span>
          </div>`
       : '';
-    return `<div class="py-1 border-b border-slate-800 last:border-0">
-      <div class="flex justify-between text-sm">
-        <span style="color:${COIN_COLORS[c]||'#94a3b8'}">${c}${dot}</span>
-        <span>$${s.capital.toFixed(2)}</span>
-        <span class="text-slate-400 text-xs">${posStr}</span>
-      </div>${posDetail}
+    return `<div style="padding:.55rem 0;border-bottom:1px solid var(--border);last:border-0">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:.85rem">
+        <span style="color:${COIN_COLORS[c]||'#94a3b8'};font-weight:600">${halt}${c}</span>
+        <span style="font-family:monospace;font-size:.8rem">$${s.capital.toFixed(2)}</span>
+        <span style="font-size:.75rem">${posLabel}</span>
+      </div>${detail}
     </div>`;
   }).join('');
 }
@@ -588,14 +729,20 @@ async function updateStatus() {
     const r = await fetch('/api/status');
     const d = await r.json();
     const pnl = d.portfolio.daily_pnl_pct;
-    const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400';
+    const pnlColor = pnl >= 0 ? 'color:var(--up)' : 'color:var(--down)';
     document.getElementById('mode-badge').textContent =
-      (d.mode === 'paper' ? '📝 PAPER MODE' : '🔴 REAL MODE') + '  |  ' + (d.exchange || 'bybit').toUpperCase();
+      (d.mode === 'paper' ? '📝 PAPER' : '🔴 REAL') + ' · ' + (d.exchange || 'bybit').toUpperCase();
     document.getElementById('total-capital').textContent = '$' + d.portfolio.total_capital.toLocaleString();
     document.getElementById('daily-pnl').innerHTML =
-      `<span class="${pnlColor}">일일 ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
+      `<span style="${pnlColor};font-size:.85rem">일일 ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
     document.getElementById('last-update').textContent =
       new Date().toLocaleTimeString('ko-KR', {timeZone:'Asia/Seoul', hour12:false}) + ' KST';
+    // KPI
+    const activeCnt = Object.values(d.coins).filter(s => s.position !== 0).length;
+    const kpiPos = document.getElementById('kpi-positions');
+    if (kpiPos) kpiPos.textContent = activeCnt + ' / ' + Object.keys(d.coins).length;
+    const kpiLev = document.getElementById('kpi-leverage');
+    if (kpiLev) kpiLev.textContent = (d.leverage || '-') + (d.leverage ? 'x' : '');
     renderProcesses(d.processes);
     renderCoins(d.coins);
   } catch(e) { console.warn('status err', e); }
@@ -606,19 +753,10 @@ async function updateChart() {
   try {
     const r = await fetch('/api/capital');
     const series = await r.json();
-    if (!chart) return;
-    chart.data.datasets = Object.entries(series)
-      .filter(([,pts]) => pts.length > 1)
-      .map(([coin, pts]) => ({
-        label: coin,
-        data: pts.map(p => ({ x: new Date(p.t.replace(' UTC','').replace(' ','T')+'Z'), y: p.v })),
-        borderColor: COIN_COLORS[coin] || '#94a3b8',
-        backgroundColor: 'transparent',
-        borderWidth: 2,
-        pointRadius: 2,
-        tension: 0.3,
-      }));
-    chart.update('none');
+    lastCapitalSeries = series;
+    if (!document.getElementById('capital-modal').classList.contains('hidden')) {
+      renderChart(series);
+    }
   } catch(e) { console.warn('chart err', e); }
 }
 
@@ -690,7 +828,6 @@ async function updateTrades() {
 }
 
 // ─── 초기화 + 자동 갱신 ─────────────────────────────────────────────────
-initChart();
 updateStatus();
 updateLogs();
 updateChart();
