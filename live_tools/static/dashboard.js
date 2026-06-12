@@ -176,12 +176,25 @@ async function updateChart() {
   } catch (e) { console.warn('chart err', e); }
 }
 
+function _fmtLog(line) {
+  const e = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return e
+    .replace(/(RSI=)([\d.]+)/g, '$1<b>$2</b>')
+    .replace(/(trend=)(RG|UP|DN)/g, (_, k, v) => {
+      const c = v==='UP'?'#10b981': v==='DN'?'#f43f5e':'#f59e0b';
+      return `${k}<b style="color:${c}">${v}</b>`;
+    })
+    .replace(/(lo=)(\d+)/g, '$1<b>$2</b>')
+    .replace(/(hi=)(\b\d+\b)/g, '$1<b>$2</b>')
+    .replace(/(pos=)(-?\d+)/g, '$1<b>$2</b>');
+}
+
 async function updateLogs() {
   try {
     const r = await fetch('/api/logs?n=120');
     const d = await r.json();
     const el = document.getElementById('log-box');
-    el.textContent = d.lines.join('\n');
+    el.innerHTML = d.lines.map(_fmtLog).join('\n');
     if (document.getElementById('auto-scroll').checked)
       el.scrollTop = el.scrollHeight;
     document.getElementById('log-update').textContent =
