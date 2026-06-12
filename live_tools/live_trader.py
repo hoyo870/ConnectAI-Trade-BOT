@@ -806,13 +806,14 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
     else:
         state["_bars_since_balance_sync"] = 0  # 포지션 보유 중엔 카운터 리셋
 
-    if state.get("daily_halt"):
+    _halt_enabled = os.getenv("DAILY_HALT_ENABLED", "false").lower() in ("1", "true", "yes")
+    if _halt_enabled and state.get("daily_halt"):
         log.info(f"[{coin}/AF 스킵] daily_halt=True")
         return state
 
     daily_start    = state.get("daily_start_capital", state["capital"])
     daily_loss_pct = (state["capital"] - daily_start) / (daily_start + 1e-9)
-    if daily_loss_pct <= -0.02:
+    if _halt_enabled and daily_loss_pct <= -0.02:
         log.warning(f"[{coin}] 일일 손실 한도 {daily_loss_pct:.2%} → 금일 거래 중단")
         if state["position"] != 0:
             _close_and_log(exchange, state, price, now_str, forced=True, reason="일일한도",
@@ -865,12 +866,13 @@ def process_tick(exchange, models, scaler, device, params: dict, state: dict,
         state["daily_halt"]  = False
         log.info(f"[일일리셋] 시작자본={capital:.0f} USDT")
 
-    if state.get("daily_halt"):
+    _halt_enabled = os.getenv("DAILY_HALT_ENABLED", "false").lower() in ("1", "true", "yes")
+    if _halt_enabled and state.get("daily_halt"):
         return state
 
     daily_start    = state.get("daily_start_capital", capital)
     daily_loss_pct = (capital - daily_start) / (daily_start + 1e-9)
-    if daily_loss_pct <= -0.02:
+    if _halt_enabled and daily_loss_pct <= -0.02:
         log.warning(f"[일일한도] 손실 {daily_loss_pct:.2%} → 금일 거래 중단")
         if pos != 0:
             _close_and_log(exchange, state, price, now_str, forced=True, reason="일일한도",
