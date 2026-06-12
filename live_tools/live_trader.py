@@ -136,6 +136,7 @@ DEFAULT_STATE = {
     "af_current_rr":     0.0,   # 현재 자본 위험 비율 (피라미딩으로 증가)
     "af_entry_atr":      0.0,   # 진입 시점 ATR (피라미딩 단계 계산용)
     "af_registered_sl":  0.0,   # 거래소에 등록된 SL 가격 (갱신 여부 판단용)
+    "af_partial_taken":  False, # RSI 극단구간 절반 익절 실행 여부 (청산 시 리셋)
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
@@ -150,7 +151,7 @@ AF_PARAMS = {
     "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
     "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.10,  # 초기 자본 위험 비율
-    "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
+    "rr_add":          0.08,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
     "add_levels":      3,     # 최대 피라미딩 횟수
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
     "leverage":        int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
@@ -191,6 +192,7 @@ def _clear_entry_fields(state: dict) -> None:
         "entry_sig_long", "entry_sig_short",
         "af_trail_sl", "af_peak_price", "af_pyramid_count",
         "af_current_rr", "af_entry_atr", "af_registered_sl",
+        "af_partial_taken",
     ):
         state[key] = copy.deepcopy(DEFAULT_STATE.get(key, 0))
 
@@ -414,12 +416,54 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 new_trail = state["af_peak_price"] + trail_mult * atr
                 state["af_trail_sl"] = min(state["af_trail_sl"], new_trail)
 
+            # ── 절반 익절 (RSI 극단구간) ────────────────────────────────────────
+            if not state.get("af_partial_taken", False):
+                partial_ok = (pos == 1 and rsi >= rsi_hi) or (pos == -1 and rsi <= rsi_lo)
+                if partial_ok:
+                    _dec    = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
+                    half_qty = round(state["entry_qty"] / 2, _dec)
+                    min_q   = MIN_QTY()
+                    if half_qty >= min_q and (state["entry_qty"] - half_qty) >= min_q:
+                        avg_e = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+                        prr   = state["entry_rr"] * 0.5
+                        ppnl  = max(pos * (price - avg_e) / (avg_e + 1e-9) * lev * prr, -prr)
+                        cap_b = state["capital"]
+                        log.info(
+                            f"[{coin}/AF 절반익절] RSI={rsi:.1f} "
+                            f"qty {state['entry_qty']} → {state['entry_qty'] - half_qty:.{_dec}f} "
+                            f"PnL={ppnl:+.4f}"
+                        )
+                        success = True
+                        if not paper_mode:
+                            try:
+                                place_market_order(exchange, "sell" if pos == 1 else "buy", half_qty, reduce_only=True)
+                            except Exception as _pe:
+                                log.error(f"[{coin}/AF 절반익절 실패] {_pe}")
+                                success = False
+                        if success:
+                            state["capital"]         *= (1 + ppnl)
+                            state["entry_qty"]        -= half_qty
+                            state["entry_rr"]         *= 0.5
+                            state["af_current_rr"]     = state["entry_rr"]
+                            state["af_partial_taken"]  = True
+                            send_trade_alert(
+                                f"✂️ <b>[{coin}/AF] 절반 익절</b>\n"
+                                f"RSI={rsi:.1f} | 가격={price:,.4f}\n"
+                                f"익절qty={half_qty} | PnL={ppnl:+.4f}\n"
+                                f"자본: {cap_b:,.0f} → {state['capital']:,.0f} USDT"
+                            )
+                    else:
+                        log.info(f"[{coin}/AF 절반익절 스킵] half_qty={half_qty} < min_qty={min_q}")
+
             # 피라미딩 체크 (유리방향 N×ATR마다 추가)
             entry_atr = state.get("af_entry_atr", atr) or atr
             base_entry = float(state.get("avg_entry_price") or state.get("entry_price") or price)
             favorable = pos * (price - base_entry) / (entry_atr + 1e-9)
             next_lvl  = (state["af_pyramid_count"] + 1) * p["atr_add_step"]
-            if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl:
+            rsi_ok_pyr = (pos == 1 and rsi < rsi_hi) or (pos == -1 and rsi > rsi_lo)
+            if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl and not rsi_ok_pyr:
+                log.info(f"[{coin}/AF 피라미딩 RSI차단] RSI={rsi:.1f} 극단구간 스킵")
+            if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl and rsi_ok_pyr:
                 pyramid_snapshot = {
                     "entry_price":       state.get("entry_price", 0.0),
                     "avg_entry_price":   state.get("avg_entry_price", 0.0),
@@ -591,6 +635,11 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
 
     # 거래소 포지션 동기화: 봉 사이에 거래소 SL이 체결된 경우 state 업데이트
     if state.get("position", 0) != 0 and not paper_mode:
+        balance_pre_sl = 0.0
+        try:
+            balance_pre_sl = get_usdt_balance(exchange)
+        except Exception:
+            pass
         try:
             ex_pos = get_position(exchange)
             if ex_pos["side"] is None or ex_pos["size"] == 0:
@@ -612,7 +661,21 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 if entry_price > 0 and exit_price > 0:
                     pnl_raw = pos * (exit_price - entry_price) / entry_price
                     pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
+                    capital_before_sl = state["capital"]
                     state["capital"] *= (1 + pnl)
+                    # 실잔고 델타 동기화 (수수료·펀딩피 흡수)
+                    if balance_pre_sl > 0:
+                        try:
+                            balance_post_sl = get_usdt_balance(exchange)
+                            if balance_post_sl > 0:
+                                actual_pnl_usdt = balance_post_sl - balance_pre_sl
+                                state["capital"] = capital_before_sl + actual_pnl_usdt
+                                log.info(
+                                    f"[{coin}/AF EX_SL 자본동기화] "
+                                    f"계산={capital_before_sl*(1+pnl):,.2f} → 실잔고={state['capital']:,.2f} USDT"
+                                )
+                        except Exception:
+                            pass
                     state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
 
                     now_str_sync = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
