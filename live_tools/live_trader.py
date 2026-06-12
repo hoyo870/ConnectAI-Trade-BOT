@@ -145,12 +145,13 @@ DEFAULT_STATE = {
 AF_PARAMS = {
     "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
     "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
-    "rg_rsi_lo":       30,    # 횡보:     롱 진입 RSI 임계값
-    "rg_rsi_hi":       70,    # 횡보:     숏 진입 RSI 임계값
+    "rg_rsi_lo":       25,    # 횡보:     롱 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
+    "rg_rsi_hi":       75,    # 횡보:     숏 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
     "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값
     "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값
+    "bb_sigma":        0.5,   # 횡보 구역 BB 폭 (0=EMA 기준, 0.5=BB 0.5σ 권장)
     "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
-    "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
+    "trail_atr_tight": 2.0,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.20,  # 초기 자본 위험 비율
     "rr_add":          0.10,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
     "add_levels":      3,     # 최대 피라미딩 횟수
@@ -160,23 +161,35 @@ AF_PARAMS = {
 }
 
 # ── 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) ───────────────────────────
-# 스윕 검증: temp/PARAM_SWEEP_LOG.md (2026-06-11)
+# 스윕 검증: temp/scripts/51_bb_trail_sweep.py (2026-06-12)
+# 공통: BB0.5σ 횡보 구역 적용 (1h BB 내부 = ranging → rg_rsi 기준 둔감화)
 _AF_PRESETS: dict[str, dict] = {
-    # stable: R1+S2+P4 — TPD≈8.6, MDD≈3.3%, hist BTC 10/10
+    # stable: BB0.5σ rg=25/75 i=1.5 t=2.0 — 2026 +341.8%, MDD 3.5%, hist BTC 10/10
     "stable": {
         "dt_rsi_lo": 25, "dt_rsi_hi": 65,
-        "rg_rsi_lo": 30, "rg_rsi_hi": 70,
+        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
         "ut_rsi_lo": 38, "ut_rsi_hi": 75,
-        "trail_atr_init": 1.0, "trail_atr_tight": 1.2,
+        "bb_sigma": 0.5,
+        "trail_atr_init": 1.5, "trail_atr_tight": 2.0,
         "add_levels": 4,
     },
-    # aggressive: R2+S2+P4 — TPD≈13.2, MDD≈4.1%, hist BTC 10/10
+    # aggressive: BB0.5σ rg=25/75 i=1.0 t=2.0 — 거래수 많음, 수익률 최대화
     "aggressive": {
         "dt_rsi_lo": 28, "dt_rsi_hi": 62,
-        "rg_rsi_lo": 32, "rg_rsi_hi": 68,
+        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
         "ut_rsi_lo": 40, "ut_rsi_hi": 72,
-        "trail_atr_init": 1.0, "trail_atr_tight": 1.2,
+        "bb_sigma": 0.5,
+        "trail_atr_init": 1.0, "trail_atr_tight": 2.0,
         "add_levels": 4,
+    },
+    # conservative: BB0.5σ rg=22/78 i=2.0 t=2.5 — 2026 +325.3%, MDD 3.3%, hist BTC 10/10
+    "conservative": {
+        "dt_rsi_lo": 22, "dt_rsi_hi": 65,
+        "rg_rsi_lo": 22, "rg_rsi_hi": 78,
+        "ut_rsi_lo": 35, "ut_rsi_hi": 78,
+        "bb_sigma": 0.5,
+        "trail_atr_init": 2.0, "trail_atr_tight": 2.5,
+        "add_levels": 3,
     },
 }
 
@@ -345,12 +358,23 @@ def _compute_af_indicators(df: pd.DataFrame) -> tuple:
     al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
     rsi = float((100 - 100 / (1 + ag / (al + 1e-9))).iloc[-1])
 
-    # 1h EMA20 추세 (마지막 1h 봉 기준)
+    # 1h EMA20 + BB 횡보 구역 추세 판별 (마지막 1h 봉 기준)
+    # bb_sigma > 0: price > BB upper → trendup, price < BB lower → trenddown, 사이 → ranging
+    # bb_sigma = 0: 기존 EMA 기준 (price > EMA → up, price < EMA → down)
     try:
         cl1h   = close.resample("1h").last().ffill()
         ema_1h = cl1h.ewm(span=20, adjust=False).mean()
-        trend_up   = bool(cl1h.iloc[-1] > ema_1h.iloc[-1])
-        trend_down = bool(cl1h.iloc[-1] < ema_1h.iloc[-1])
+        bb_sigma = AF_PARAMS.get("bb_sigma", 0.0)
+        if bb_sigma > 0:
+            std_1h = cl1h.rolling(20).std()
+            bb_up  = (ema_1h + bb_sigma * std_1h).iloc[-1]
+            bb_lo  = (ema_1h - bb_sigma * std_1h).iloc[-1]
+            last   = float(cl1h.iloc[-1])
+            trend_up   = bool(last > bb_up)
+            trend_down = bool(last < bb_lo)
+        else:
+            trend_up   = bool(cl1h.iloc[-1] > ema_1h.iloc[-1])
+            trend_down = bool(cl1h.iloc[-1] < ema_1h.iloc[-1])
     except Exception:
         trend_up = trend_down = False
 
