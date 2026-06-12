@@ -151,8 +151,8 @@ AF_PARAMS = {
     "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값
     "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
     "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (ATR 배수)
-    "rr_base":         0.10,  # 초기 자본 위험 비율
-    "rr_add":          0.08,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
+    "rr_base":         0.20,  # 초기 자본 위험 비율
+    "rr_add":          0.10,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
     "add_levels":      3,     # 최대 피라미딩 횟수
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
     "leverage":        int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
@@ -743,7 +743,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 log.warning(f"[{coin} 일일동기화 실패] {_se}")
             # 거래소 closed PnL 히스토리 최근 5건 로그 출력
             try:
-                history = get_closed_pnl_history(exchange, limit=5)
+                history = get_closed_pnl_history(exchange, limit=50)
                 if history:
                     log.info(f"[{coin} 거래소 최근청산 {len(history)}건]")
                     for h in history:
@@ -772,14 +772,11 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                     proportion = state["capital"] / total_tracked
                     expected   = actual_balance * proportion
                     drift      = abs(expected - state["capital"]) / (state["capital"] + 1e-9)
-                    if drift > 0.02:
-                        log.warning(
-                            f"[{coin} 잔고괴리감지] {state['capital']:,.2f} → {expected:,.2f} USDT "
-                            f"(drift={drift:.2%}) → 즉시 동기화"
-                        )
-                        state["capital"] = expected
-                    else:
-                        log.info(f"[{coin} 잔고확인] drift={drift:.3%} 정상")
+                    log.info(
+                        f"[{coin} 잔고동기화] {state['capital']:,.2f} → {expected:,.2f} USDT "
+                        f"(drift={drift:.2%})"
+                    )
+                    state["capital"] = expected
             except Exception:
                 pass
     else:
