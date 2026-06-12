@@ -105,7 +105,8 @@ def _make_processes(paper: bool) -> list:
         "STRATEGY":   os.environ.get("STRATEGY", "antifragile"),
     }
     trader_cmd = [sys.executable, "live_tools/live_trader.py"]
-    watch_cmd  = [sys.executable, "live_tools/bot_manage.py", "watch", "--kill"]
+    _wk_enabled = os.environ.get("WATCHDOG_KILL_ENABLED", "false").lower() in ("1", "true", "yes")
+    watch_cmd   = [sys.executable, "live_tools/bot_manage.py", "watch"] + (["--kill"] if _wk_enabled else [])
     procs = [ManagedProcess("trader",   trader_cmd, restart=True)]
     if not paper:
         procs.append(ManagedProcess("watchdog", watch_cmd,  restart=True))
