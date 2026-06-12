@@ -402,11 +402,10 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     long_ok_now = rsi <= rsi_lo
     short_ok_now = rsi >= rsi_hi and not long_ok_now
     candle_ts = df.index[-1] if len(df.index) else "n/a"
-    _B = "\033[1m"; _X = "\033[0m"
     log.info(
         f"[{coin}/AF 신호] ts={candle_ts} price={price:,.4f} "
-        f"RSI={_B}{rsi:.1f}{_X} trend={_B}{trend_str}{_X} lo={_B}{rsi_lo}{_X} hi={_B}{rsi_hi}{_X} "
-        f"long={long_ok_now} short={short_ok_now} pos={_B}{pos}{_X} halt={state.get('daily_halt', False)}"
+        f"RSI={rsi:.1f} trend={trend_str} lo={rsi_lo} hi={rsi_hi} "
+        f"long={long_ok_now} short={short_ok_now} pos={pos} halt={state.get('daily_halt', False)}"
     )
 
     # ── AF 상태 안전 초기화 (구버전 state 로드 또는 첫 실행 시) ───────────────────
