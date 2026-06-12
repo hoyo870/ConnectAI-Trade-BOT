@@ -119,9 +119,14 @@ def build_exchange(mode: Optional[str] = None):
 
 
 def get_usdt_balance(exchange) -> float:
-    """사용 가능한 USDT 잔고 반환."""
+    """USDT 지갑 잔고 반환 (증거금 포함, 미실현손익 미포함).
+
+    free(가용잔고) 대신 total(지갑잔고)을 사용.
+    포지션 개수·피라미딩 여부와 무관하게 안정적인 값 반환.
+    """
     balance = exchange.fetch_balance()
-    return float(balance.get("USDT", {}).get("free", 0.0))
+    usdt = balance.get("USDT", {})
+    return float(usdt.get("total") or usdt.get("free", 0.0))
 
 
 def get_position(exchange) -> dict:
