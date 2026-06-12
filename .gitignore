@@ -30,5 +30,9 @@ logs/*
 .vscode/
 *.DS_Store
 
-# ── 임시 연구 스크립트 ────────────────────────────────────────────────────────
-temp/
+# ── 임시 연구 스크립트 (*.md, scripts/*.py 는 추적) ──────────────────────────
+temp/*
+!temp/*.md
+!temp/scripts
+temp/scripts/*
+!temp/scripts/*.py
