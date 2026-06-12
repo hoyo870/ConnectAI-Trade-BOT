@@ -252,6 +252,40 @@ def get_last_closed_price(exchange) -> float:
     return 0.0
 
 
+def get_closed_pnl_history(exchange, limit: int = 20) -> list:
+    """Bybit V5 최근 청산 포지션 PnL 히스토리 조회 (per-symbol).
+
+    Returns list of dicts: symbol, side, qty, entry_price, exit_price,
+    realized_pnl, created_time, updated_time
+    """
+    if exchange.id != "bybit":
+        return []
+    coin = os.environ.get("COIN", "BTC").upper()
+    symbol_raw = coin + "USDT"
+    try:
+        result = exchange.private_get_v5_position_closed_pnl({
+            "category": "linear",
+            "symbol":   symbol_raw,
+            "limit":    str(limit),
+        })
+        entries = (result.get("result") or {}).get("list", [])
+        return [
+            {
+                "symbol":       e.get("symbol", ""),
+                "side":         e.get("side", ""),
+                "qty":          float(e.get("qty") or 0),
+                "entry_price":  float(e.get("avgEntryPrice") or 0),
+                "exit_price":   float(e.get("avgExitPrice") or 0),
+                "realized_pnl": float(e.get("closedPnl") or 0),
+                "created_time": e.get("createdTime", ""),
+                "updated_time": e.get("updatedTime", ""),
+            }
+            for e in entries
+        ]
+    except Exception:
+        return []
+
+
 def cancel_position_stop_loss(exchange) -> None:
     """포지션 stop-loss 해제 (청산 후 잔여 SL 제거용)."""
     coin = os.environ.get("COIN", "BTC").upper()

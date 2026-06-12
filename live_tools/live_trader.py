@@ -34,6 +34,7 @@ from exchange_client import (
     build_exchange, get_usdt_balance, get_position,
     set_leverage, place_market_order, close_position,
     fetch_ohlcv_df, calc_qty, get_symbol, get_min_qty,
+    get_closed_pnl_history,
     set_position_stop_loss, cancel_position_stop_loss,
     get_last_closed_price,
 )
@@ -182,6 +183,19 @@ _AF_PRESETS: dict[str, dict] = {
 
 def fresh_state() -> dict:
     return copy.deepcopy(DEFAULT_STATE)
+
+
+def _total_tracked_capital(paper_mode: bool) -> float:
+    """4종 코인 state 파일에서 총 자본 합산 (비례 동기화용)."""
+    prefix = "paper" if paper_mode else "live"
+    total = 0.0
+    for sfx in ("", "_eth", "_sol", "_xrp"):
+        p = ROOT / "logs" / f"{prefix}_state{sfx}.json"
+        try:
+            total += json.loads(p.read_text()).get("capital", 0.0)
+        except Exception:
+            pass
+    return total
 
 
 def _clear_entry_fields(state: dict) -> None:
@@ -710,13 +724,66 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
     state["current_bar"] += 1
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # 일일 손실 한도 리셋 (2%)
+    # 일일 손실 한도 리셋 + 거래소 잔고 절대 동기화
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.get("daily_date") != today:
+        if not paper_mode:
+            try:
+                actual_balance = get_usdt_balance(exchange)
+                total_tracked  = _total_tracked_capital(paper_mode=False)
+                if actual_balance > 0 and total_tracked > 0:
+                    proportion  = state["capital"] / total_tracked
+                    new_capital = actual_balance * proportion
+                    log.info(
+                        f"[{coin} 일일동기화] 거래소총잔고={actual_balance:,.2f} USDT "
+                        f"× {proportion:.4f} → {state['capital']:,.2f} → {new_capital:,.2f} USDT"
+                    )
+                    state["capital"] = new_capital
+            except Exception as _se:
+                log.warning(f"[{coin} 일일동기화 실패] {_se}")
+            # 거래소 closed PnL 히스토리 최근 5건 로그 출력
+            try:
+                history = get_closed_pnl_history(exchange, limit=5)
+                if history:
+                    log.info(f"[{coin} 거래소 최근청산 {len(history)}건]")
+                    for h in history:
+                        log.info(
+                            f"  {h['side']} qty={h['qty']} "
+                            f"entry={h['entry_price']:.4f} exit={h['exit_price']:.4f} "
+                            f"realizedPnL={h['realized_pnl']:+.4f} USDT  [{h['updated_time']}]"
+                        )
+            except Exception as _he:
+                log.warning(f"[{coin} PnL히스토리 조회실패] {_he}")
         state["daily_start_capital"] = state["capital"]
         state["daily_date"]  = today
         state["daily_halt"]  = False
         log.info(f"[{coin} 일일리셋] 시작자본={state['capital']:.0f} USDT")
+
+    # 포지션 없을 때 12봉(1시간)마다 잔고 drift 체크 → 2% 초과 시 즉시 동기화
+    if not paper_mode and state.get("position", 0) == 0:
+        bars_chk = state.get("_bars_since_balance_sync", 0) + 1
+        state["_bars_since_balance_sync"] = bars_chk
+        if bars_chk >= 12:
+            state["_bars_since_balance_sync"] = 0
+            try:
+                actual_balance = get_usdt_balance(exchange)
+                total_tracked  = _total_tracked_capital(paper_mode=False)
+                if actual_balance > 0 and total_tracked > 0:
+                    proportion = state["capital"] / total_tracked
+                    expected   = actual_balance * proportion
+                    drift      = abs(expected - state["capital"]) / (state["capital"] + 1e-9)
+                    if drift > 0.02:
+                        log.warning(
+                            f"[{coin} 잔고괴리감지] {state['capital']:,.2f} → {expected:,.2f} USDT "
+                            f"(drift={drift:.2%}) → 즉시 동기화"
+                        )
+                        state["capital"] = expected
+                    else:
+                        log.info(f"[{coin} 잔고확인] drift={drift:.3%} 정상")
+            except Exception:
+                pass
+    else:
+        state["_bars_since_balance_sync"] = 0  # 포지션 보유 중엔 카운터 리셋
 
     if state.get("daily_halt"):
         log.info(f"[{coin}/AF 스킵] daily_halt=True")
