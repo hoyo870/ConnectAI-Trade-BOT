@@ -147,6 +147,7 @@ def run_antifragile(
                 pnl = max(raw * leverage * current_rr, -current_rr)
                 capital *= (1 + pnl)
                 trade_log.append({"pnl": pnl, "hold_steps": idx - entry_bar,
+                                   "entry_bar": entry_bar, "exit_bar": idx,
                                    "lev": leverage, "rr": current_rr, "forced": True, "direction": pos})
                 pos = 0
 
@@ -158,6 +159,7 @@ def run_antifragile(
                 pnl = max(raw * leverage * current_rr, -current_rr)
                 capital *= (1 + pnl)
                 trade_log.append({"pnl": pnl, "hold_steps": idx - entry_bar,
+                                   "entry_bar": entry_bar, "exit_bar": idx,
                                    "lev": leverage, "rr": current_rr, "forced": True, "direction": pos})
                 pos = 0
             equity_curve.append(capital); continue
@@ -183,6 +185,7 @@ def run_antifragile(
                 pnl = max(raw * leverage * current_rr, -current_rr)
                 capital *= (1 + pnl)
                 trade_log.append({"pnl": pnl, "hold_steps": hold,
+                                   "entry_bar": entry_bar, "exit_bar": idx,
                                    "lev": leverage, "rr": current_rr, "forced": False, "direction": pos})
                 pos = 0; add_count = 0; current_rr = 0.0
             else:

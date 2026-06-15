@@ -154,12 +154,15 @@ def close_position(exchange, pos: dict):
     place_market_order(exchange, close_side, pos["size"], reduce_only=True)
 
 
-def fetch_ohlcv_df(exchange, limit: int = 500):
-    """5분봉 OHLCV DataFrame 반환 (index = DatetimeIndex UTC). Rate limit 시 최대 3회 재시도."""
+def fetch_ohlcv_df(exchange, limit: int = 500, coin: str = None):
+    """5분봉 OHLCV DataFrame 반환 (index = DatetimeIndex UTC). Rate limit 시 최대 3회 재시도.
+    coin 파라미터로 직접 지정 가능 (병렬 fetch 시 env var 경쟁 방지)."""
     import pandas as pd
+    symbol = _COIN_SYMBOL_MAP.get((coin or os.environ.get("COIN", "BTC")).upper(),
+                                   f"{(coin or os.environ.get('COIN', 'BTC')).upper()}/USDT:USDT")
     for attempt in range(3):
         try:
-            raw = exchange.fetch_ohlcv(get_symbol(), "5m", limit=limit)
+            raw = exchange.fetch_ohlcv(symbol, "5m", limit=limit)
             df  = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             df.set_index("timestamp", inplace=True)
@@ -171,9 +174,9 @@ def fetch_ohlcv_df(exchange, limit: int = 500):
             raise
 
 
-def calc_qty(capital: float, entry_rr: float, leverage: float, price: float) -> float:
+def calc_qty(capital: float, entry_rr: float, leverage: float, price: float, coin: str = None) -> float:
     """포지션 수량 계산. COIN별 최소 단위 자동 적용."""
-    coin = os.environ.get("COIN", "BTC").upper()
+    coin = (coin or os.environ.get("COIN", "BTC")).upper()
     decimals = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
     qty = (capital * entry_rr * leverage) / price
     return round(qty, decimals)

@@ -15,6 +15,7 @@ STRATEGY 옵션 (.env):
 """
 from __future__ import annotations
 import sys, os, json, time, logging, csv, copy, fcntl
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -162,7 +163,7 @@ AF_PARAMS = {
 
 # 거래소 emergency SL 배수: trail_sl 대신 넓은 SL을 등록해 intrabar 조기 체결 방지
 # 소프트웨어 trail_sl은 봉 close 기준으로 별도 체크 (백테스트와 동일)
-EMERGENCY_SL_ATR = 4.0
+EMERGENCY_SL_ATR = 6.0  # 4→6: intrabar wick SL 조기 체결 방지 강화
 
 # ── 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) ───────────────────────────
 # 스윕 검증: temp/scripts/51_bb_trail_sweep.py (2026-06-12)
@@ -659,15 +660,19 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 # ── 멀티코인 AF 전용: 단일 코인 틱 처리 ───────────────────────────────────────
 def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                       paper_trade_csv: Optional[Path],
-                      total_tracked_snapshot: float | None = None) -> dict:
+                      total_tracked_snapshot: float | None = None,
+                      prefetched_df=None) -> dict:
     """4종목 멀티코인 모드 — 코인별 OHLCV fetch → 중복 방지 → process_tick_af 호출."""
     os.environ["COIN"] = coin
 
-    try:
-        df = fetch_ohlcv_df(exchange, limit=FETCH_LIMIT)
-    except Exception as e:
-        log.error(f"[{coin}] OHLCV 조회 실패: {e}")
-        return state
+    if prefetched_df is not None:
+        df = prefetched_df
+    else:
+        try:
+            df = fetch_ohlcv_df(exchange, limit=FETCH_LIMIT, coin=coin)
+        except Exception as e:
+            log.error(f"[{coin}] OHLCV 조회 실패: {e}")
+            return state
     df = _completed_ohlcv_df(df)
 
     if len(df) < SIG_ROLL_WIN + 10:
@@ -1306,7 +1311,7 @@ def build_daily_report_multi(all_states: dict, mode: str, paper_mode: bool) -> s
 # ── 다음 5분봉까지 대기 ────────────────────────────────────────────────────────
 def sleep_until_next_candle(on_wait_tick=None, poll_interval: float = STOP_POLL_INTERVAL) -> bool:
     now  = time.time()
-    wait = 300 - (now % 300) + 5   # 5초 여유
+    wait = 300 - (now % 300) + 1   # 1초 여유 (5→1: 봉 마감 후 최대한 빠르게 체결)
     log.info(f"다음 캔들까지 {wait:.0f}초 대기...")
     deadline = now + wait
 
@@ -1564,12 +1569,28 @@ def main():
                     last_daily_date = today_utc
 
                 total_tracked_snapshot = sum(s.get("capital", 0.0) for s in all_states.values())
+
+                # 4코인 OHLCV 병렬 fetch (순차 fetch 대비 ~12초 단축)
+                def _fetch(c):
+                    try:
+                        return c, fetch_ohlcv_df(exchange, limit=FETCH_LIMIT, coin=c)
+                    except Exception as e:
+                        log.error(f"[{c}] OHLCV 조회 실패: {e}")
+                        return c, None
+
+                prefetched = {}
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    for c, df in pool.map(_fetch, COINS_MULTI):
+                        prefetched[c] = df
+
+                # 처리는 순차 실행 (state 독립, 주문은 코인별 다른 심볼)
                 for c in COINS_MULTI:
                     try:
                         all_states[c] = _run_coin_tick_af(
                             exchange, c, all_states[c], paper_mode,
                             all_paths[c]["paper_trade_csv"],
-                            total_tracked_snapshot
+                            total_tracked_snapshot,
+                            prefetched_df=prefetched.get(c),
                         )
                         atomic_write_json(all_paths[c]["state_file"], all_states[c])
                     except Exception as e:
