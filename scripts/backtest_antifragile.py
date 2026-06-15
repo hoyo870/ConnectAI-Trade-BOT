@@ -74,24 +74,24 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def run_antifragile(
     df,
     initial_capital = 10_000.0,
-    # AdaptRSI 진입 임계값 (1h 추세별)
-    dt_rsi_lo = 22,   # 하락추세: 롱 진입
-    dt_rsi_hi = 65,   # 하락추세: 숏 진입
-    rg_rsi_lo = 30,   # 횡보:     롱 진입
-    rg_rsi_hi = 70,   # 횡보:     숏 진입
-    ut_rsi_lo = 35,   # 상승추세: 롱 진입
-    ut_rsi_hi = 78,   # 상승추세: 숏 진입
+    # AdaptRSI 진입 임계값 — 실거래 prod 파라미터와 동일하게 유지
+    dt_rsi_lo = 28,   # 하락추세: 롱 진입
+    dt_rsi_hi = 60,   # 하락추세: 숏 진입
+    rg_rsi_lo = 25,   # 횡보:     롱 진입
+    rg_rsi_hi = 75,   # 횡보:     숏 진입
+    ut_rsi_lo = 42,   # 상승추세: 롱 진입
+    ut_rsi_hi = 75,   # 상승추세: 숏 진입
     require_bb      = False,  # BB 밴드 이탈 추가 조건 (False가 더 좋음)
-    # 레버리지
-    leverage        = 3,
-    # 포지션 사이징 (역 마틴게일)
-    rr_base         = 0.10,   # 초기 자본 위험 비율
-    rr_add          = 0.15,   # 피라미딩 추가 비율
-    add_levels      = 3,      # 최대 추가 횟수 (총 rr = 0.10 + 3×0.15 = 0.55)
+    # 레버리지 — .env LEVERAGE=7과 동일
+    leverage        = 7,
+    # 포지션 사이징 — live_trader AF_PARAMS와 동일
+    rr_base         = 0.20,   # 초기 자본 위험 비율
+    rr_add          = 0.10,   # 피라미딩 추가 비율
+    add_levels      = 3,      # 최대 추가 횟수
     atr_add_step    = 0.5,    # 유리방향 X×ATR마다 추가
-    # Trailing Stop
-    trail_atr_init  = 0.5,    # 초기 trailing stop 거리 (ATR 배수)
-    trail_atr_tight = 0.8,    # 피라미딩 후 tight trailing (ATR 배수)
+    # Trailing Stop — prod 스윕 최적값
+    trail_atr_init  = 1.8,    # 초기 trailing stop 거리 (ATR 배수)
+    trail_atr_tight = 2.0,    # 피라미딩 후 tight trailing (ATR 배수)
     # 기타
     max_hold_bars   = 288,    # 최대 보유 (1일 = 288봉)
     cooling_bars    = 100,
@@ -395,22 +395,23 @@ def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days,
     return passes, returns
 
 
+# 프리셋 — live_trader.py _AF_PRESETS와 동일하게 유지 (2026-06-15 스윕 최적화)
 _PRESETS = {
     "prod": dict(
-        dt_rsi_lo=22, dt_rsi_hi=65, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=40, ut_rsi_hi=85, trail_atr_init=1.0, trail_atr_tight=2.0, add_levels=3,
+        dt_rsi_lo=28, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=42, ut_rsi_hi=75, trail_atr_init=1.8, trail_atr_tight=2.0, add_levels=3,
     ),
     "stable": dict(
-        dt_rsi_lo=25, dt_rsi_hi=65, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=38, ut_rsi_hi=75, trail_atr_init=1.5, trail_atr_tight=2.0, add_levels=4,
+        dt_rsi_lo=30, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=42, ut_rsi_hi=70, trail_atr_init=1.5, trail_atr_tight=2.0, add_levels=4,
     ),
     "aggressive": dict(
-        dt_rsi_lo=28, dt_rsi_hi=62, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=40, ut_rsi_hi=72, trail_atr_init=1.0, trail_atr_tight=2.0, add_levels=4,
+        dt_rsi_lo=25, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=42, ut_rsi_hi=78, trail_atr_init=0.8, trail_atr_tight=1.5, add_levels=4,
     ),
     "conservative": dict(
-        dt_rsi_lo=22, dt_rsi_hi=65, rg_rsi_lo=22, rg_rsi_hi=78,
-        ut_rsi_lo=35, ut_rsi_hi=78, trail_atr_init=2.0, trail_atr_tight=2.5, add_levels=3,
+        dt_rsi_lo=28, dt_rsi_hi=70, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=42, ut_rsi_hi=78, trail_atr_init=2.0, trail_atr_tight=2.5, add_levels=3,
     ),
 }
 
@@ -426,8 +427,8 @@ def main():
     parser.add_argument("--seed",       type=int,   default=42)
     parser.add_argument("--window-days",type=int,   default=91)
     parser.add_argument("--require-bb", action="store_true")
-    parser.add_argument("--trail-init", type=float, default=0.5)
-    parser.add_argument("--trail-tight",type=float, default=0.8)
+    parser.add_argument("--trail-init", type=float, default=1.8)
+    parser.add_argument("--trail-tight",type=float, default=2.0)
     parser.add_argument("--add-step",   type=float, default=0.5)
     args = parser.parse_args()
 
