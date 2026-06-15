@@ -109,7 +109,7 @@ def build_exchange(mode: Optional[str] = None):
 def get_usdt_balance(exchange) -> float:
     """사용 가능한 USDT 잔고 반환."""
     balance = exchange.fetch_balance()
-    return float(balance.get("USDT", {}).get("free", 0.0))
+    return float(balance.get("USDT", {}).get("total") or balance.get("USDT", {}).get("free", 0.0))
 
 
 def get_position(exchange) -> dict:

@@ -143,14 +143,14 @@ DEFAULT_STATE = {
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
 # 기본값 (AF_PARAM_PRESET 미설정 시 사용)
 AF_PARAMS = {
-    "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
-    "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
+    "dt_rsi_lo":       28,    # 하락추세: 롱 진입 RSI 임계값
+    "dt_rsi_hi":       60,    # 하락추세: 숏 진입 RSI 임계값
     "rg_rsi_lo":       25,    # 횡보:     롱 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
     "rg_rsi_hi":       75,    # 횡보:     숏 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
-    "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값
-    "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값
+    "ut_rsi_lo":       42,    # 상승추세: 롱 진입 RSI 임계값
+    "ut_rsi_hi":       75,    # 상승추세: 숏 진입 RSI 임계값
     "bb_sigma":        0.5,   # 횡보 구역 BB 폭 (0=EMA 기준, 0.5=BB 0.5σ 권장)
-    "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (ATR 배수)
+    "trail_atr_init":  1.8,   # 초기 trailing stop 거리 (ATR 배수)
     "trail_atr_tight": 2.0,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.20,  # 초기 자본 위험 비율
     "rr_add":          0.10,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
@@ -160,33 +160,37 @@ AF_PARAMS = {
     "max_hold_bars":   288,   # 최대 보유봉수 (1일)
 }
 
+# 거래소 emergency SL 배수: trail_sl 대신 넓은 SL을 등록해 intrabar 조기 체결 방지
+# 소프트웨어 trail_sl은 봉 close 기준으로 별도 체크 (백테스트와 동일)
+EMERGENCY_SL_ATR = 4.0
+
 # ── 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) ───────────────────────────
 # 스윕 검증: temp/scripts/51_bb_trail_sweep.py (2026-06-12)
 # 공통: BB0.5σ 횡보 구역 적용 (1h BB 내부 = ranging → rg_rsi 기준 둔감화)
 _AF_PRESETS: dict[str, dict] = {
-    # stable: BB0.5σ rg=25/75 i=1.5 t=2.0 — 2026 +341.8%, MDD 3.5%, hist BTC 10/10
+    # stable: 2026 +1108%, MDD 7.2%, hist 40/40 — 스윕 최적화 2026-06-15
     "stable": {
-        "dt_rsi_lo": 25, "dt_rsi_hi": 65,
+        "dt_rsi_lo": 30, "dt_rsi_hi": 60,
         "rg_rsi_lo": 25, "rg_rsi_hi": 75,
-        "ut_rsi_lo": 38, "ut_rsi_hi": 75,
+        "ut_rsi_lo": 42, "ut_rsi_hi": 70,
         "bb_sigma": 0.5,
         "trail_atr_init": 1.5, "trail_atr_tight": 2.0,
         "add_levels": 4,
     },
-    # aggressive: BB0.5σ rg=25/75 i=1.0 t=2.0 — 거래수 많음, 수익률 최대화
+    # aggressive: 2026 +1202%, MDD 6.8%, hist 40/40 — 스윕 최적화 2026-06-15
     "aggressive": {
-        "dt_rsi_lo": 28, "dt_rsi_hi": 62,
+        "dt_rsi_lo": 25, "dt_rsi_hi": 60,
         "rg_rsi_lo": 25, "rg_rsi_hi": 75,
-        "ut_rsi_lo": 40, "ut_rsi_hi": 72,
+        "ut_rsi_lo": 42, "ut_rsi_hi": 78,
         "bb_sigma": 0.5,
-        "trail_atr_init": 1.0, "trail_atr_tight": 2.0,
+        "trail_atr_init": 0.8, "trail_atr_tight": 1.5,
         "add_levels": 4,
     },
-    # conservative: BB0.5σ rg=22/78 i=2.0 t=2.5 — 2026 +325.3%, MDD 3.3%, hist BTC 10/10
+    # conservative: 2026 +699%, MDD 8.2%, hist 38/40 — 스윕 최적화 2026-06-15
     "conservative": {
-        "dt_rsi_lo": 22, "dt_rsi_hi": 65,
-        "rg_rsi_lo": 22, "rg_rsi_hi": 78,
-        "ut_rsi_lo": 35, "ut_rsi_hi": 78,
+        "dt_rsi_lo": 28, "dt_rsi_hi": 70,
+        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
+        "ut_rsi_lo": 42, "ut_rsi_hi": 78,
         "bb_sigma": 0.5,
         "trail_atr_init": 2.0, "trail_atr_tight": 2.5,
         "add_levels": 3,
@@ -445,13 +449,15 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         else:
             # trailing stop 업데이트
             trail_mult = p["trail_atr_tight"] if state["af_pyramid_count"] > 0 else p["trail_atr_init"]
+            entry_atr_saved = state.get("af_entry_atr", atr) or atr
+            effective_atr = max(atr, entry_atr_saved * 0.6)  # 진입 ATR 60% 미만으로 SL 좁아지지 않도록
             if pos == 1:
                 state["af_peak_price"] = max(state["af_peak_price"], price)
-                new_trail = state["af_peak_price"] - trail_mult * atr
+                new_trail = state["af_peak_price"] - trail_mult * effective_atr
                 state["af_trail_sl"] = max(state["af_trail_sl"], new_trail)
             else:
                 state["af_peak_price"] = min(state["af_peak_price"], price)
-                new_trail = state["af_peak_price"] + trail_mult * atr
+                new_trail = state["af_peak_price"] + trail_mult * effective_atr
                 state["af_trail_sl"] = min(state["af_trail_sl"], new_trail)
 
             # ── 절반 익절 (RSI 극단구간) ────────────────────────────────────────
@@ -548,16 +554,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                             f"가격: {price:,.4f} | 추가수량: {add_qty}"
                         )
 
-            # trail_sl 변경 시 거래소 SL 갱신 (real 모드)
-            if not paper_mode:
-                new_sl = state["af_trail_sl"]
-                if new_sl != state.get("af_registered_sl", 0.0):
-                    try:
-                        set_position_stop_loss(exchange, new_sl)
-                        state["af_registered_sl"] = new_sl
-                        log.info(f"[{coin}/AF SL갱신] {new_sl:,.4f}")
-                    except Exception as e_sl:
-                        log.warning(f"[{coin}/AF SL갱신 실패] {e_sl}")
+            # trail_sl은 소프트웨어(봉 close 기준)로만 체크 — 거래소 SL 업데이트 없음
+            # emergency SL은 진입 시 1회만 등록 (intrabar 조기 체결 방지)
 
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
@@ -568,6 +566,9 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         short_ok = short_ok_now and trend_stable
 
         direction = 1 if long_ok else (-1 if short_ok else 0)
+        if direction != 0 and atr < price * 0.0015:
+            log.info(f"[{coin}/AF 진입 스킵] ATR={atr:.4f} < 가격×0.15% ({price * 0.0015:.4f}) — 횡보 구간")
+            direction = 0
         if direction != 0:
             dir_str    = "LONG 🟢" if direction == 1 else "SHORT 🔴"
             init_trail = (price - p["trail_atr_init"] * atr) if direction == 1 else \
@@ -622,11 +623,19 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                                 log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
                         except Exception as e2:
                             log.warning(f"[{coin}/AF] 체결확인 실패: {e2}")
-                        # 진입 직후 거래소 SL 등록
+                        # 진입 직후 거래소 emergency SL 등록
+                        # trail_sl 대신 넓은 emergency SL — intrabar 조기 체결 방지
+                        # 소프트웨어 trail_sl 체크는 봉 close 기준으로 별도 동작
                         try:
-                            set_position_stop_loss(exchange, state["af_trail_sl"])
-                            state["af_registered_sl"] = state["af_trail_sl"]
-                            log.info(f"[{coin}/AF SL등록] {state['af_trail_sl']:,.4f}")
+                            entry_px = state.get("avg_entry_price") or price
+                            entry_atr_val = state.get("af_entry_atr") or atr
+                            if direction == 1:
+                                emergency_sl = entry_px - EMERGENCY_SL_ATR * entry_atr_val
+                            else:
+                                emergency_sl = entry_px + EMERGENCY_SL_ATR * entry_atr_val
+                            set_position_stop_loss(exchange, emergency_sl)
+                            state["af_registered_sl"] = emergency_sl
+                            log.info(f"[{coin}/AF emergency SL등록] {emergency_sl:,.4f} (trail={state['af_trail_sl']:,.4f})")
                         except Exception as e_sl:
                             log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
@@ -649,7 +658,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
 # ── 멀티코인 AF 전용: 단일 코인 틱 처리 ───────────────────────────────────────
 def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
-                      paper_trade_csv: Optional[Path]) -> dict:
+                      paper_trade_csv: Optional[Path],
+                      total_tracked_snapshot: float | None = None) -> dict:
     """4종목 멀티코인 모드 — 코인별 OHLCV fetch → 중복 방지 → process_tick_af 호출."""
     os.environ["COIN"] = coin
 
@@ -673,11 +683,6 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
 
     # 거래소 포지션 동기화: 봉 사이에 거래소 SL이 체결된 경우 state 업데이트
     if state.get("position", 0) != 0 and not paper_mode:
-        balance_pre_sl = 0.0
-        try:
-            balance_pre_sl = get_usdt_balance(exchange)
-        except Exception:
-            pass
         try:
             ex_pos = get_position(exchange)
             if ex_pos["side"] is None or ex_pos["size"] == 0:
@@ -696,43 +701,53 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 if sl_estimate > 0 and actual_exit > 0:
                     slip_exit_pct = round((actual_exit - sl_estimate) / sl_estimate * 100 * pos * -1, 4)
 
-                if entry_price > 0 and exit_price > 0:
-                    pnl_raw = pos * (exit_price - entry_price) / entry_price
-                    pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
-                    capital_before_sl = state["capital"]
-                    state["capital"] *= (1 + pnl)
-                    # 실잔고 델타 동기화 (수수료·펀딩피 흡수)
-                    if balance_pre_sl > 0:
-                        try:
-                            balance_post_sl = get_usdt_balance(exchange)
-                            if balance_post_sl > 0:
-                                actual_pnl_usdt = balance_post_sl - balance_pre_sl
-                                state["capital"] = capital_before_sl + actual_pnl_usdt
-                                log.info(
-                                    f"[{coin}/AF EX_SL 자본동기화] "
-                                    f"계산={capital_before_sl*(1+pnl):,.2f} → 실잔고={state['capital']:,.2f} USDT"
-                                )
-                        except Exception:
-                            pass
-                    state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
+                capital_before_sl = state["capital"]
+                # 심볼별 실현 PnL 조회 (잔고 델타 대신 symbol-specific closed PnL 사용)
+                # 동시 다중 SL 발생 시 잔고 델타 귀속 오류를 방지
+                realized_applied = False
+                try:
+                    closed = get_closed_pnl_history(exchange, limit=1)
+                    if closed:
+                        realized_pnl_usdt = float(closed[0].get("realized_pnl", 0.0))
+                        if realized_pnl_usdt != 0.0:
+                            state["capital"] = capital_before_sl + realized_pnl_usdt
+                            log.info(
+                                f"[{coin}/AF EX_SL 자본동기화] "
+                                f"realized_pnl={realized_pnl_usdt:+.4f} USDT → {state['capital']:,.2f} USDT"
+                            )
+                            realized_applied = True
+                except Exception:
+                    pass
 
-                    now_str_sync = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                    trade_row = {
-                        "time":               now_str_sync,
-                        "direction":          pos,
-                        "entry":              entry_price,
-                        "exit":               exit_price,
-                        "pnl":                round(pnl, 6),
-                        "capital":            round(state["capital"], 2),
-                        "forced":             False,
-                        "reason":             "EX_SL",
-                        "slippage_entry_pct": round(state.pop("_entry_slippage_pct", 0.0), 4),
-                        "slippage_exit_pct":  slip_exit_pct,
-                        "exit_mark":          round(exit_price, 4),
-                    }
-                    state["trade_log"].append(trade_row)
-                    src = "실체결" if actual_exit > 0 else "trail_sl추정"
-                    log.info(f"[{coin}/AF] SL 자동체결({src}) exit={exit_price:.4f} PnL: {pnl:+.4f}, 자본: {state['capital']:,.2f}")
+                if not realized_applied and entry_price > 0 and exit_price > 0:
+                    pnl_raw = pos * (exit_price - entry_price) / entry_price
+                    pnl_est = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
+                    state["capital"] = capital_before_sl * (1 + pnl_est)
+                    log.info(
+                        f"[{coin}/AF EX_SL 자본동기화(추정)] "
+                        f"exit={exit_price:.4f} pnl={pnl_est:+.4f} → {state['capital']:,.2f} USDT"
+                    )
+
+                pnl_recorded = (state["capital"] - capital_before_sl) / (capital_before_sl + 1e-9)
+                state["peak_capital"] = max(state.get("peak_capital", state["capital"]), state["capital"])
+
+                now_str_sync = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                trade_row = {
+                    "time":               now_str_sync,
+                    "direction":          pos,
+                    "entry":              entry_price,
+                    "exit":               exit_price,
+                    "pnl":                round(pnl_recorded, 6),
+                    "capital":            round(state["capital"], 2),
+                    "forced":             False,
+                    "reason":             "EX_SL",
+                    "slippage_entry_pct": round(state.pop("_entry_slippage_pct", 0.0), 4),
+                    "slippage_exit_pct":  slip_exit_pct,
+                    "exit_mark":          round(exit_price, 4),
+                }
+                state["trade_log"].append(trade_row)
+                src = "실체결" if actual_exit > 0 else "trail_sl추정"
+                log.info(f"[{coin}/AF] SL 자동체결({src}) exit={exit_price:.4f} 자본: {capital_before_sl:,.2f} → {state['capital']:,.2f}")
 
                 _clear_entry_fields(state)
                 send_trade_alert(
@@ -754,7 +769,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         if not paper_mode:
             try:
                 actual_balance = get_usdt_balance(exchange)
-                total_tracked  = _total_tracked_capital(paper_mode=False)
+                total_tracked  = total_tracked_snapshot or _total_tracked_capital(paper_mode=False)
                 if actual_balance > 0 and total_tracked > 0:
                     proportion  = state["capital"] / total_tracked
                     new_capital = actual_balance * proportion
@@ -783,7 +798,6 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         state["daily_halt"]  = False
         log.info(f"[{coin} 일일리셋] 시작자본={state['capital']:.0f} USDT")
 
-    # 포지션 없을 때 12봉(1시간)마다 잔고 drift 체크 → 2% 초과 시 즉시 동기화
     if not paper_mode and state.get("position", 0) == 0:
         bars_chk = state.get("_bars_since_balance_sync", 0) + 1
         state["_bars_since_balance_sync"] = bars_chk
@@ -791,14 +805,12 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
             state["_bars_since_balance_sync"] = 0
             try:
                 actual_balance = get_usdt_balance(exchange)
-                total_tracked  = _total_tracked_capital(paper_mode=False)
+                total_tracked  = total_tracked_snapshot or _total_tracked_capital(paper_mode=False)
                 if actual_balance > 0 and total_tracked > 0:
                     proportion = state["capital"] / total_tracked
                     expected   = actual_balance * proportion
-                    drift      = abs(expected - state["capital"]) / (state["capital"] + 1e-9)
                     log.info(
-                        f"[{coin} 잔고동기화] {state['capital']:,.2f} → {expected:,.2f} USDT "
-                        f"(drift={drift:.2%})"
+                        f"[{coin} 잔고동기화] {state['capital']:,.2f} → {expected:,.2f} USDT"
                     )
                     state["capital"] = expected
             except Exception:
@@ -1048,6 +1060,7 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
                 ex_after = get_position(exchange)
                 if ex_after["side"] is None or ex_after["size"] == 0:
                     log.info(f"[청산확인] 포지션 정상 청산 실체결={mark_px:.4f}")
+                    cancel_position_stop_loss(exchange)
                 else:
                     log.warning(f"[청산경고] 잔여포지션: side={ex_after['side']} size={ex_after['size']}")
             except Exception as e2:
@@ -1074,14 +1087,20 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
     capital_before = state["capital"]
     state["capital"] *= (1 + pnl)
 
-    # 실잔고 델타로 자본 동기화 (펀딩피·수수료 오차 흡수)
-    if not paper_mode and balance_before > 0:
+    # 심볼별 실현 PnL로 자본 동기화 (수수료 흡수, 다중 동시청산 귀속 오류 방지)
+    if not paper_mode:
         try:
-            balance_after = get_usdt_balance(exchange)
-            if balance_after > 0:
-                actual_pnl_usdt = balance_after - balance_before
-                state["capital"] = capital_before + actual_pnl_usdt
-                log.info(f"[자본 동기화] 계산={capital_before*(1+pnl):,.2f} → 실잔고={state['capital']:,.2f} USDT")
+            closed = get_closed_pnl_history(exchange, limit=1)
+            if closed:
+                realized_pnl_usdt = float(closed[0].get("realized_pnl", 0.0))
+                if realized_pnl_usdt != 0.0:
+                    state["capital"] = capital_before + realized_pnl_usdt
+                    log.info(f"[자본 동기화] 계산={capital_before*(1+pnl):,.2f} → realized={state['capital']:,.2f} USDT")
+            elif balance_before > 0:
+                balance_after = get_usdt_balance(exchange)
+                if balance_after > 0:
+                    state["capital"] = capital_before + (balance_after - balance_before)
+                    log.info(f"[자본 동기화] 계산={capital_before*(1+pnl):,.2f} → 실잔고={state['capital']:,.2f} USDT")
         except Exception:
             pass  # 조회 실패 시 계산값 유지
 
@@ -1387,17 +1406,60 @@ def main():
                     for k, v in DEFAULT_STATE.items():
                         st.setdefault(k, copy.deepcopy(v))
                     st["peak_capital"] = max(st.get("peak_capital", st["capital"]), st["capital"])
-                    # entry_qty=0인 open 포지션 → 거래소에서 실수량 복원 (real 모드만)
-                    if mode == "real" and st.get("position", 0) != 0 and st.get("entry_qty", 0.0) == 0.0:
+                    # real 모드 시작 시 포지션 동기화 (오프라인 SL 감지 + entry_qty 복원)
+                    if mode == "real" and st.get("position", 0) != 0:
                         try:
                             os.environ["COIN"] = c
                             ex_pos = get_position(exchange)
-                            if ex_pos["size"] > 0:
-                                st["entry_qty"]       = ex_pos["size"]
-                                st["avg_entry_price"] = ex_pos["entry_price"] or st.get("entry_price", 0.0)
-                                log.info(f"[{c}] entry_qty 마이그레이션: {ex_pos['size']} @ {st['avg_entry_price']:.4f}")
+                            if ex_pos["side"] is None or ex_pos["size"] == 0:
+                                # 오프라인 중 SL/TP 체결 — realized PnL로 자본 복원 후 state 초기화
+                                log.warning(f"[{c}] 시작 시 포지션 불일치 — 오프라인 체결 감지, 자본 복원")
+                                capital_before_rc = st["capital"]
+                                entry_price_rc = float(st.get("avg_entry_price") or st.get("entry_price") or 0.0)
+                                pos_rc         = st["position"]
+                                realized_applied = False
+                                try:
+                                    closed = get_closed_pnl_history(exchange, limit=1)
+                                    if closed:
+                                        realized_pnl_usdt = float(closed[0].get("realized_pnl", 0.0))
+                                        exit_price_rc     = float(closed[0].get("exit_price") or 0.0)
+                                        if realized_pnl_usdt != 0.0:
+                                            st["capital"] = capital_before_rc + realized_pnl_usdt
+                                            st["peak_capital"] = max(st.get("peak_capital", st["capital"]), st["capital"])
+                                            now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                                            st["trade_log"].append({
+                                                "time":               now_s,
+                                                "direction":          pos_rc,
+                                                "entry":              entry_price_rc,
+                                                "exit":               exit_price_rc,
+                                                "pnl":                round(realized_pnl_usdt / (capital_before_rc + 1e-9), 6),
+                                                "capital":            round(st["capital"], 2),
+                                                "forced":             False,
+                                                "reason":             "STARTUP_RECONCILE",
+                                                "slippage_entry_pct": 0.0,
+                                                "slippage_exit_pct":  0.0,
+                                                "exit_mark":          round(exit_price_rc, 4),
+                                            })
+                                            log.info(
+                                                f"[{c}] 시작 자본복원 완료: "
+                                                f"realized_pnl={realized_pnl_usdt:+.4f} USDT "
+                                                f"→ {st['capital']:,.2f} USDT"
+                                            )
+                                            realized_applied = True
+                                except Exception as _re:
+                                    log.warning(f"[{c}] realized_pnl 조회 실패: {_re}")
+                                if not realized_applied:
+                                    log.warning(f"[{c}] 자본복원 실패 — 기존값 유지 (수동 확인 필요)")
+                                _clear_entry_fields(st)
+                                atomic_write_json(sf, st)  # 대시보드 즉시 반영
+                            else:
+                                # 포지션 여전히 열려있음 — 수량·진입가 동기화
+                                st["entry_qty"]       = float(ex_pos["size"])
+                                st["avg_entry_price"] = float(ex_pos["entry_price"] or st.get("entry_price", 0.0))
+                                log.info(f"[{c}] 포지션 확인: {ex_pos['side']} {ex_pos['size']} @ {st['avg_entry_price']:.4f}")
+                                atomic_write_json(sf, st)  # 대시보드 즉시 반영
                         except Exception as _em:
-                            log.warning(f"[{c}] entry_qty 마이그레이션 실패: {_em}")
+                            log.warning(f"[{c}] 시작 포지션 동기화 실패: {_em}")
                     all_states[c] = st
                 except Exception:
                     all_states[c] = fresh_state()
@@ -1421,6 +1483,27 @@ def main():
 
         total_cap = sum(s["capital"] for s in all_states.values())
         log.info(f"총 자본: {total_cap:,.2f} USDT | 종목당: {total_cap/len(all_states):.2f} USDT")
+
+        # 시작 시 exchange 잔고 기준 자본 비례 보정 (과거 잘못된 동기화 누적 교정)
+        if mode == "real" and total_cap > 0:
+            try:
+                actual_balance = get_usdt_balance(exchange)
+                if actual_balance > 0:
+                    for c in COINS_MULTI:
+                        s = all_states[c]
+                        proportion = s["capital"] / total_cap
+                        new_cap    = actual_balance * proportion
+                        log.info(
+                            f"[{c} startup동기화] {s['capital']:,.2f} → {new_cap:,.2f} USDT "
+                            f"(비율={proportion:.4f})"
+                        )
+                        s["capital"]      = new_cap
+                        s["peak_capital"] = max(s.get("peak_capital", new_cap), new_cap)
+                        atomic_write_json(all_paths[c]["state_file"], s)
+                    total_cap = actual_balance
+                    log.info(f"[startup동기화 완료] exchange={actual_balance:,.2f} USDT → 4코인 비례 보정")
+            except Exception as _ss:
+                log.warning(f"[startup 자본동기화 실패] {_ss}")
 
         per_coin_cap = total_cap / len(all_states)
         send_trade_alert(
@@ -1480,11 +1563,13 @@ def main():
                     log.info(f"[일일 보고] {last_daily_date} 결산 → 텔레그램 발송")
                     last_daily_date = today_utc
 
+                total_tracked_snapshot = sum(s.get("capital", 0.0) for s in all_states.values())
                 for c in COINS_MULTI:
                     try:
                         all_states[c] = _run_coin_tick_af(
                             exchange, c, all_states[c], paper_mode,
-                            all_paths[c]["paper_trade_csv"]
+                            all_paths[c]["paper_trade_csv"],
+                            total_tracked_snapshot
                         )
                         atomic_write_json(all_paths[c]["state_file"], all_states[c])
                     except Exception as e:

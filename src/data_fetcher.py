@@ -9,6 +9,7 @@ import os
 import time
 import argparse
 from datetime import datetime, timezone
+from typing import Optional
 
 import ccxt
 import pandas as pd
@@ -31,7 +32,7 @@ def fetch_ohlcv(
     symbol:     str = DEFAULT_SYM,
     timeframe:  str = DEFAULT_TF,
     start_date: str = "2022-01-01",
-    end_date:   str | None = None,
+    end_date:   Optional[str] = None,
     save: bool  = True,
 ) -> pd.DataFrame:
     """

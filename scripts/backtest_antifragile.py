@@ -105,6 +105,7 @@ def run_antifragile(
     peak_cap   = initial_capital
     pos        = 0
     entry_price = 0.0
+    entry_atr   = 0.0
     current_rr  = 0.0
     add_count   = 0
     trail_sl    = 0.0
@@ -164,15 +165,16 @@ def run_antifragile(
         # 포지션 관리 (trailing stop + 피라미딩)
         if pos != 0:
             hold = idx - entry_bar
+            effective_atr = max(atr, entry_atr * 0.6)  # 진입 ATR 60% 미만으로 SL 좁아지지 않도록
             if pos == 1:
                 peak_price = max(peak_price, price)
                 trail_mult = trail_atr_tight if add_count > 0 else trail_atr_init
-                trail_sl   = max(trail_sl, peak_price - trail_mult * atr)
+                trail_sl   = max(trail_sl, peak_price - trail_mult * effective_atr)
                 hit_stop   = price <= trail_sl
             else:
                 peak_price = min(peak_price, price)
                 trail_mult = trail_atr_tight if add_count > 0 else trail_atr_init
-                trail_sl   = min(trail_sl, peak_price + trail_mult * atr)
+                trail_sl   = min(trail_sl, peak_price + trail_mult * effective_atr)
                 hit_stop   = price >= trail_sl
 
             if hit_stop or hold >= max_hold_bars:
@@ -188,22 +190,25 @@ def run_antifragile(
                 next_add_level = (add_count + 1) * atr_add_step
                 if add_count < add_levels and favorable_move >= next_add_level:
                     current_rr += rr_add; add_count += 1
-                    if pos == 1: trail_sl = max(trail_sl, price - trail_atr_tight * atr)
-                    else:         trail_sl = min(trail_sl, price + trail_atr_tight * atr)
+                    if pos == 1: trail_sl = max(trail_sl, price - trail_atr_tight * effective_atr)
+                    else:         trail_sl = min(trail_sl, price + trail_atr_tight * effective_atr)
 
         # 신규 진입
         if pos == 0:
             long_ok  = (rsi <= rsi_lo) and ((not require_bb) or (price <= bb_l))
             short_ok = (rsi >= rsi_hi) and ((not require_bb) or (price >= bb_u))
 
+            if (long_ok or short_ok) and atr < price * 0.0015:
+                long_ok = short_ok = False  # ATR 너무 낮음 — 횡보 구간 진입 차단
+
             if long_ok:
                 ep          = price * (1 + FEE_TOTAL)
-                entry_price = ep; current_rr = rr_base; add_count = 0
+                entry_price = ep; entry_atr = atr; current_rr = rr_base; add_count = 0
                 trail_sl    = ep - trail_atr_init * atr; peak_price = ep
                 pos = 1; entry_bar = idx
             elif short_ok:
                 ep          = price * (1 - FEE_TOTAL)
-                entry_price = ep; current_rr = rr_base; add_count = 0
+                entry_price = ep; entry_atr = atr; current_rr = rr_base; add_count = 0
                 trail_sl    = ep + trail_atr_init * atr; peak_price = ep
                 pos = -1; entry_bar = idx
 
@@ -298,10 +303,10 @@ def load_coin_full(coin: str) -> pd.DataFrame:
 
     if coin == "btc":
         pieces = []
-        for fname in ["data/raw/BTCUSDT_5m_20200101_20251231.csv",
-                      "data/raw/BTCUSDT_5m_20260101_20260520.csv"]:
+        # data/raw/ 의 모든 BTCUSDT CSV 자동 탐색 (날짜순)
+        for f in sorted((ROOT / "data/raw").glob("BTCUSDT_5m_*.csv")):
             try:
-                pieces.append(_normalize_index(load_ohlcv_csv(ROOT / fname)))
+                pieces.append(_normalize_index(load_ohlcv_csv(f)))
             except Exception:
                 pass
         if not pieces:
@@ -314,6 +319,12 @@ def load_coin_full(coin: str) -> pd.DataFrame:
             _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_history.parquet")),
             _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet")),
         ]
+        # data/raw/ 의 추가 ETH CSV (최신화 파일)
+        for f in sorted((ROOT / "data/raw").glob("ETHUSDT_5m_*.csv")):
+            try:
+                pieces.append(_normalize_index(load_ohlcv_csv(f)))
+            except Exception:
+                pass
 
     else:
         # SOL, XRP — data/raw/ 에서 패턴 탐색
@@ -384,11 +395,33 @@ def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days,
     return passes, returns
 
 
+_PRESETS = {
+    "prod": dict(
+        dt_rsi_lo=22, dt_rsi_hi=65, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=40, ut_rsi_hi=85, trail_atr_init=1.0, trail_atr_tight=2.0, add_levels=3,
+    ),
+    "stable": dict(
+        dt_rsi_lo=25, dt_rsi_hi=65, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=38, ut_rsi_hi=75, trail_atr_init=1.5, trail_atr_tight=2.0, add_levels=4,
+    ),
+    "aggressive": dict(
+        dt_rsi_lo=28, dt_rsi_hi=62, rg_rsi_lo=25, rg_rsi_hi=75,
+        ut_rsi_lo=40, ut_rsi_hi=72, trail_atr_init=1.0, trail_atr_tight=2.0, add_levels=4,
+    ),
+    "conservative": dict(
+        dt_rsi_lo=22, dt_rsi_hi=65, rg_rsi_lo=22, rg_rsi_hi=78,
+        ut_rsi_lo=35, ut_rsi_hi=78, trail_atr_init=2.0, trail_atr_tight=2.5, add_levels=3,
+    ),
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Antifragile Trailing Stop Backtest")
     parser.add_argument("--coin",       default="btc",
                         choices=["btc", "eth", "sol", "xrp", "both", "all"])
-    parser.add_argument("--mode",       default="2026", choices=["2026", "random", "both"])
+    parser.add_argument("--mode",       default="2026", choices=["2026", "random", "both", "june2026"])
+    parser.add_argument("--preset",     default=None,   choices=list(_PRESETS.keys()),
+                        help="파라미터 프리셋 (prod/stable/aggressive/conservative)")
     parser.add_argument("--windows",    type=int,   default=10)
     parser.add_argument("--seed",       type=int,   default=42)
     parser.add_argument("--window-days",type=int,   default=91)
@@ -410,13 +443,16 @@ def main():
         trail_atr_tight = args.trail_tight,
         atr_add_step    = args.add_step,
     )
+    if args.preset:
+        cfg.update(_PRESETS[args.preset])
+
+    preset_label = f"preset={args.preset}" if args.preset else f"trail_init={cfg['trail_atr_init']}  trail_tight={cfg['trail_atr_tight']}"
 
     for coin in coins:
         label = coin.upper()
         print(f"\n{'█'*66}")
         print(f"  Antifragile Trailing Stop — {label}/USDT 5m")
-        print(f"  trail_init={args.trail_init}  trail_tight={args.trail_tight}  "
-              f"add_step={args.add_step}  require_bb={args.require_bb}")
+        print(f"  {preset_label}  add_step={cfg.get('atr_add_step', args.add_step)}  require_bb={args.require_bb}")
         print(f"{'█'*66}")
 
         try:
@@ -439,6 +475,19 @@ def main():
                 print(f"\n{label} 2026: {df26.index[0].date()} ~ {df26.index[-1].date()}  ({days}일)")
                 result = run_antifragile(df26, **cfg)
                 print_result(f"{label} 2026", result, days)
+
+            if args.mode == "june2026":
+                if all_df_cache is None:
+                    all_df_cache = load_coin_full(coin)
+                dfall = all_df_cache
+                df_june = dfall[(dfall.index >= "2026-06-01") & (dfall.index < "2026-07-01")]
+                if len(df_june) < 100:
+                    print(f"\n  ⚠️  {label} 2026-06 데이터 부족 ({len(df_june)}행)")
+                else:
+                    days = (df_june.index[-1] - df_june.index[0]).days
+                    print(f"\n{label} 2026-06: {df_june.index[0].date()} ~ {df_june.index[-1].date()}  ({days}일)")
+                    result = run_antifragile(df_june, **cfg)
+                    print_result(f"{label} 2026-06", result, days)
 
             if args.mode in ("random", "both"):
                 if all_df_cache is None:
