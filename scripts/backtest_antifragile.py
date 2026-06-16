@@ -34,9 +34,9 @@ def load_ohlcv_csv(path):
     return df.sort_index()
 
 ROOT = Path(__file__).parent.parent
-TRADING_FEE = 0.0005
-SLIPPAGE    = 0.0002
-FEE_TOTAL   = TRADING_FEE + SLIPPAGE
+TRADING_FEE = 0.00055  # Bybit taker 실측 0.055%
+SLIPPAGE    = 0.00056  # 실거래 관측 평균 슬리피지 0.056%
+FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # 0.111%/side
 
 
 # ─────────────────────────────────────────────────────────────────────────────
