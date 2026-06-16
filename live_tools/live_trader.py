@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # config 접근
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -40,6 +41,7 @@ from exchange_client import (
     get_last_closed_price,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
+from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 ROOT        = Path(__file__).parent.parent
@@ -143,59 +145,23 @@ DEFAULT_STATE = {
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
 # 기본값 (AF_PARAM_PRESET 미설정 시 사용)
+# 기본 파라미터: config/af_params.py DEFAULT_PARAMS 기반 + 실거래 전용 필드 추가
 AF_PARAMS = {
-    "dt_rsi_lo":       28,    # 하락추세: 롱 진입 RSI 임계값
-    "dt_rsi_hi":       60,    # 하락추세: 숏 진입 RSI 임계값
-    "rg_rsi_lo":       25,    # 횡보:     롱 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
-    "rg_rsi_hi":       75,    # 횡보:     숏 진입 RSI 임계값 (BB 구역 적용 시 둔감화)
-    "ut_rsi_lo":       42,    # 상승추세: 롱 진입 RSI 임계값
-    "ut_rsi_hi":       75,    # 상승추세: 숏 진입 RSI 임계값
-    "bb_sigma":        0.5,   # 횡보 구역 BB 폭 (0=EMA 기준, 0.5=BB 0.5σ 권장)
-    "trail_atr_init":  1.8,   # 초기 trailing stop 거리 (ATR 배수)
-    "trail_atr_tight": 2.0,   # 피라미딩 후 tight trailing (ATR 배수)
-    "rr_base":         0.20,  # 초기 자본 위험 비율
-    "rr_add":          0.10,  # 피라미딩 1회당 추가 비율 (base보다 작게 → 평단 이동 억제)
-    "add_levels":      3,     # 최대 피라미딩 횟수
-    "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
-    "leverage":        int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
-    "max_hold_bars":   288,   # 최대 보유봉수 (1일)
+    **DEFAULT_PARAMS,
+    "bb_sigma":      0.5,   # 횡보 구역 BB 폭 (0=EMA 기준, 0.5=BB 0.5σ 권장)
+    "leverage":      int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
+    "max_hold_bars": 288,   # 최대 보유봉수 (1일)
 }
 
-# 거래소 emergency SL 배수: trail_sl 대신 넓은 SL을 등록해 intrabar 조기 체결 방지
-# 소프트웨어 trail_sl은 봉 close 기준으로 별도 체크 (백테스트와 동일)
-EMERGENCY_SL_ATR = 6.0  # 4→6: intrabar wick SL 조기 체결 방지 강화
+# 거래소 emergency SL: trail_sl 대신 넓은 SL 등록 → intrabar 조기 체결 방지
+EMERGENCY_SL_ATR = 6.0
 
-# ── 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) ───────────────────────────
-# 스윕 검증: temp/scripts/51_bb_trail_sweep.py (2026-06-12)
-# 공통: BB0.5σ 횡보 구역 적용 (1h BB 내부 = ranging → rg_rsi 기준 둔감화)
+# 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) — config/af_params.py 중앙 관리
+# 실거래 전용 bb_sigma=0.5를 각 프리셋에 추가
 _AF_PRESETS: dict[str, dict] = {
-    # stable: 2026 +1108%, MDD 7.2%, hist 40/40 — 스윕 최적화 2026-06-15
-    "stable": {
-        "dt_rsi_lo": 30, "dt_rsi_hi": 60,
-        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
-        "ut_rsi_lo": 42, "ut_rsi_hi": 70,
-        "bb_sigma": 0.5,
-        "trail_atr_init": 1.5, "trail_atr_tight": 2.0,
-        "add_levels": 4,
-    },
-    # aggressive: 2026 +1202%, MDD 6.8%, hist 40/40 — 스윕 최적화 2026-06-15
-    "aggressive": {
-        "dt_rsi_lo": 25, "dt_rsi_hi": 60,
-        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
-        "ut_rsi_lo": 42, "ut_rsi_hi": 78,
-        "bb_sigma": 0.5,
-        "trail_atr_init": 0.8, "trail_atr_tight": 1.5,
-        "add_levels": 4,
-    },
-    # conservative: 2026 +699%, MDD 8.2%, hist 38/40 — 스윕 최적화 2026-06-15
-    "conservative": {
-        "dt_rsi_lo": 28, "dt_rsi_hi": 70,
-        "rg_rsi_lo": 25, "rg_rsi_hi": 75,
-        "ut_rsi_lo": 42, "ut_rsi_hi": 78,
-        "bb_sigma": 0.5,
-        "trail_atr_init": 2.0, "trail_atr_tight": 2.5,
-        "add_levels": 3,
-    },
+    name: {**get_preset(name), "bb_sigma": 0.5}
+    for name in _PRESET_DEFS
+    if name != "prod"  # prod = AF_PARAMS 기본값
 }
 
 

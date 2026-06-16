@@ -17,12 +17,16 @@ Usage:
   python scripts/backtest_antifragile.py --mode random --require-bb
 """
 import sys, argparse, random
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
 sys.path.insert(0, "src")
+sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from hybrid_engine import compute_metrics
+from config.af_params import TRADING_FEE, SLIPPAGE, FEE_TOTAL, PRESETS, get_preset
 
 
 def load_ohlcv_csv(path):
@@ -32,11 +36,6 @@ def load_ohlcv_csv(path):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_index()
-
-ROOT = Path(__file__).parent.parent
-TRADING_FEE = 0.00055  # Bybit taker 실측 0.055%
-SLIPPAGE    = 0.00056  # 실거래 관측 평균 슬리피지 0.056%
-FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # 0.111%/side
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +94,7 @@ def run_antifragile(
     # 기타
     max_hold_bars   = 288,    # 최대 보유 (1일 = 288봉)
     cooling_bars    = 100,
-    max_dd_cb       = 0.30,
+    max_dd_cb       = 0.99,  # 실거래엔 이 제약 없음 → 사실상 비활성화
 ):
     df = df.reset_index(drop=True)
     df.dropna(subset=["_rsi", "_atr"], inplace=True)
@@ -398,25 +397,7 @@ def run_random_validation(all_df, coin_label, cfg, seed, windows, window_days,
     return passes, returns
 
 
-# 프리셋 — live_trader.py _AF_PRESETS와 동일하게 유지 (2026-06-15 스윕 최적화)
-_PRESETS = {
-    "prod": dict(
-        dt_rsi_lo=28, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=42, ut_rsi_hi=75, trail_atr_init=1.8, trail_atr_tight=2.0, add_levels=3,
-    ),
-    "stable": dict(
-        dt_rsi_lo=30, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=42, ut_rsi_hi=70, trail_atr_init=1.5, trail_atr_tight=2.0, add_levels=4,
-    ),
-    "aggressive": dict(
-        dt_rsi_lo=25, dt_rsi_hi=60, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=42, ut_rsi_hi=78, trail_atr_init=0.8, trail_atr_tight=1.5, add_levels=4,
-    ),
-    "conservative": dict(
-        dt_rsi_lo=28, dt_rsi_hi=70, rg_rsi_lo=25, rg_rsi_hi=75,
-        ut_rsi_lo=42, ut_rsi_hi=78, trail_atr_init=2.0, trail_atr_tight=2.5, add_levels=3,
-    ),
-}
+# 프리셋은 config/af_params.py에서 중앙 관리 (PRESETS, get_preset import됨)
 
 
 def main():
@@ -424,7 +405,7 @@ def main():
     parser.add_argument("--coin",       default="btc",
                         choices=["btc", "eth", "sol", "xrp", "both", "all"])
     parser.add_argument("--mode",       default="2026", choices=["2026", "random", "both", "june2026"])
-    parser.add_argument("--preset",     default=None,   choices=list(_PRESETS.keys()),
+    parser.add_argument("--preset",     default=None,   choices=list(PRESETS.keys()),
                         help="파라미터 프리셋 (prod/stable/aggressive/conservative)")
     parser.add_argument("--windows",    type=int,   default=10)
     parser.add_argument("--seed",       type=int,   default=42)
@@ -448,7 +429,7 @@ def main():
         atr_add_step    = args.add_step,
     )
     if args.preset:
-        cfg.update(_PRESETS[args.preset])
+        cfg.update(get_preset(args.preset))
 
     preset_label = f"preset={args.preset}" if args.preset else f"trail_init={cfg['trail_atr_init']}  trail_tight={cfg['trail_atr_tight']}"
 

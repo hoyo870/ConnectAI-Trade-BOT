@@ -1,126 +1,142 @@
 # 스크립트 사용 가이드
 
-## scripts/ — 프로덕션 스크립트
+## 구조
 
-### backtest_antifragile.py ⭐ (신규)
+```
+scripts/
+├── backtest_antifragile.py   # 핵심 백테스트 엔진
+├── backtest.py               # 구버전 DL v17 백테스트 (참고용)
+├── analyze_*.py              # 분석 유틸
+└── sweeps/                   # 파라미터 스윕 스크립트
+    ├── param_sweep.py        # trail × RSI 그리드 스윕
+    ├── rsi_sweep.py          # RSI 축별 독립 스윕 (dt/rg/ut)
+    ├── preset_sweep.py       # 종목 × 프리셋 비교
+    └── leverage_sweep.py     # 레버리지별 수익/MDD 선형성 체크
 
-Antifragile Trailing Stop 전략 백테스트. `STRATEGY=antifragile` 활성화 전 검증용.
+config/
+└── af_params.py              # 프리셋/수수료 상수 단일 소스 (backtest + live_trader 공용)
 
-```bash
-# 2026 기본 검증
-python scripts/backtest_antifragile.py --coin btc --mode 2026
-python scripts/backtest_antifragile.py --coin eth --mode 2026
-python scripts/backtest_antifragile.py --coin both --mode 2026
-
-# 역사적 랜덤 10회 검증
-python scripts/backtest_antifragile.py --coin both --mode random --seed 42
-
-# 파라미터 조정
-python scripts/backtest_antifragile.py --coin both --mode 2026 --require-bb     # BB 이탈 조건 추가
-python scripts/backtest_antifragile.py --coin both --mode 2026 --trail-init 0.3  # 좁은 초기 trail
+live_tools/                   # 실거래 봇 (프로덕션)
+temp/scripts/                 # 실험용 스크립트 (33~56번, 참고용)
 ```
 
-**주요 파라미터:**
+---
+
+## 백테스트 기본 규칙
+
+- **2026 OOS 기간**: `2026-01-01 ~ 2026-05-31` (6월 이후는 실거래 기간)
+- **수수료**: `FEE_TOTAL=0.111%/side` (Bybit taker 0.055% + 실측 슬리피지 0.056%)
+- **판정 기준 3/3**: 수익률 > 0%, TPD ≥ 1.5, Top-5 제거 후 수익 > 0%
+- **hist 통과**: 91일 × 10창 중 7창 이상 판정 통과
+
+---
+
+## scripts/backtest_antifragile.py
+
+Antifragile Trailing Stop 전략 핵심 엔진.
+
+```bash
+# 단일 코인 2026 OOS
+python scripts/backtest_antifragile.py --coin btc --mode 2026
+python scripts/backtest_antifragile.py --coin all --mode 2026
+
+# 역사적 검증 (91일 × 10창)
+python scripts/backtest_antifragile.py --coin all --mode random --seed 42
+
+# 2026-06 단기 검증
+python scripts/backtest_antifragile.py --coin all --mode june2026
+
+# 프리셋 지정
+python scripts/backtest_antifragile.py --coin all --mode 2026 --preset stable
+python scripts/backtest_antifragile.py --coin all --mode 2026 --preset aggressive
+```
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
-| `--coin` | `btc` | `btc` \| `eth` \| `both` |
-| `--mode` | `2026` | `2026` \| `random` \| `both` |
-| `--windows` | `10` | 랜덤 검증 횟수 |
+| `--coin` | `btc` | `btc` \| `eth` \| `sol` \| `xrp` \| `all` |
+| `--mode` | `2026` | `2026` \| `random` \| `both` \| `june2026` |
+| `--preset` | _(없음)_ | `prod` \| `stable` \| `aggressive` \| `conservative` |
+| `--windows` | `10` | 랜덤 검증 창 수 |
 | `--seed` | `42` | 랜덤 시드 |
-| `--window-days` | `91` | 랜덤 윈도우 길이 (일) |
-| `--require-bb` | `False` | BB 밴드 이탈 조건 추가 |
-| `--trail-init` | `0.5` | 초기 trailing ATR 배수 |
-| `--trail-tight` | `0.8` | 피라미딩 후 trailing ATR 배수 |
-| `--add-step` | `0.5` | 피라미딩 트리거 ATR 배수 |
-
-**검증 기준 (trailing 전략용):**
-- 수익률 > 0%
-- TPD ≥ 1.5
-- Top-5 제거 후 수익 > 0%
+| `--trail-init` | `1.8` | 초기 trailing ATR 배수 |
+| `--trail-tight` | `2.0` | 피라미딩 후 trailing ATR 배수 |
 
 ---
 
-### backtest.py — DL v17 전략
+## scripts/sweeps/
+
+### preset_sweep.py — 종목 × 프리셋 비교
 
 ```bash
-# 2026 기본 검증
-python scripts/backtest.py --coin both --mode 2026
-
-# 역사적 랜덤 10회
-python scripts/backtest.py --coin both --mode random --windows 10 --seed 42
-
-# ETH Pullback 전략
-python scripts/backtest.py --coin eth --mode 2026 --strategy pullback
-
-# 특정 구간
-python scripts/backtest.py --coin btc --mode custom --start 2024-01-01 --end 2024-04-01
+python scripts/sweeps/preset_sweep.py              # BTC (기본)
+python scripts/sweeps/preset_sweep.py --all        # 4종목 전체
+python scripts/sweeps/preset_sweep.py --coin eth   # ETH만
 ```
 
-**주요 파라미터:**
-
-| 파라미터 | 값 | 기본값 | 설명 |
-|---|---|---|---|
-| `--coin` | `btc` \| `eth` \| `both` | `both` | 대상 코인 |
-| `--mode` | `2026` \| `random` \| `custom` | `2026` | 구간 모드 |
-| `--strategy` | `instant` \| `pullback` | `instant` | 진입 전략 |
-| `--windows` | int | `10` | 랜덤 구간 수 |
-| `--seed` | int | `42` | 랜덤 시드 |
-| `--start` / `--end` | `YYYY-MM-DD` | — | custom 모드 구간 |
-
-**판정 기준 (3/3 통과):**
-- 승률 ≥ 45%
-- 일일 거래수(TPD) ≥ 1.5
-- 일 평균 수익률 ≥ 1.0%
-
----
-
-### 분석 스크립트
+### leverage_sweep.py — 레버리지별 수익/MDD 비교
 
 ```bash
-# BTC 펀딩비 포함 수익률 분석
-python scripts/analyze_funding.py
+python scripts/sweeps/leverage_sweep.py                         # 기본 1/3/5/7/10x
+python scripts/sweeps/leverage_sweep.py --leverages 5 7 10     # 특정 레버리지만
+python scripts/sweeps/leverage_sweep.py --preset stable         # 프리셋 지정
+```
 
-# ETH 펀딩비 + 하이브리드 게이트 분석
-python scripts/analyze_funding_eth.py
+### param_sweep.py — trail × RSI 그리드 스윕
 
-# DL v17 Top-N 제거 outlier 분석
-python scripts/analyze_top_trades.py
+```bash
+python scripts/sweeps/param_sweep.py --phase 1    # trail_init × trail_tight
+python scripts/sweeps/param_sweep.py --phase 2    # RSI 조합
+python scripts/sweeps/param_sweep.py --phase all  # 전체
+```
+
+### rsi_sweep.py — RSI 축별 독립 스윕
+
+```bash
+python scripts/sweeps/rsi_sweep.py --phase 2a   # dt_rsi_lo × dt_rsi_hi
+python scripts/sweeps/rsi_sweep.py --phase 2b   # ut_rsi_lo × ut_rsi_hi
+python scripts/sweeps/rsi_sweep.py --phase 2c   # rg_rsi_lo × rg_rsi_hi
+python scripts/sweeps/rsi_sweep.py --phase 3    # 프리셋별 trail 검증
+python scripts/sweeps/rsi_sweep.py --phase all  # 전체
 ```
 
 ---
 
-## src/ — 핵심 라이브러리
+## config/af_params.py — 프리셋 관리
+
+프리셋 변경 시 이 파일만 수정하면 backtest + live_trader 양쪽에 반영됩니다.
+
+| 프리셋 | dt_lo/hi | ut_lo/hi | trail init/tight | 특성 |
+|--------|----------|----------|-----------------|------|
+| `prod` | 28/60 | 42/75 | 1.8/2.0 | 기본값 (실거래 기준) |
+| `stable` | 30/60 | 42/70 | 1.5/2.0 | 보수적 진입, hist 통과율↑ |
+| `aggressive` | 25/60 | 42/78 | 0.8/1.5 | 넓은 진입, 거래빈도↑ |
+| `conservative` | 28/70 | 42/78 | 2.0/2.5 | 엄격한 진입, 손절여유↑ |
+
+```python
+from config.af_params import get_preset, PRESETS, FEE_TOTAL
+cfg = get_preset("prod")   # DEFAULT_PARAMS + prod 오버라이드 병합
+```
+
+---
+
+## live_tools/ — 실거래 봇
 
 | 파일 | 역할 |
 |------|------|
-| `live_trader.py` | 실거래 루프 (`STRATEGY` 환경변수로 전략 선택) |
-| `data_pipeline.py` | OHLCV → 지표 30+개, 스케일링, 레이블 |
-| `expert_models.py` | TCN + Multi-Head Attention 아키텍처 |
-| `hybrid_engine.py` | DL v17 백테스트 엔진 + `compute_metrics()` |
-| `signal_extractor.py` | 배치 DL 시그널 추출 |
+| `live_trader.py` | 메인 실거래 루프 (5분봉 기반) |
 | `exchange_client.py` | Bybit 선물 API 래퍼 |
+| `run.py` | 봇 시작/재시작 진입점 |
+| `bot_manage.py` | 프로세스 관리 유틸 |
 | `telegram_notifier.py` | 텔레그램 알림 + `/stop` kill switch |
-| `data_fetcher.py` | OHLCV 원시 데이터 수집 |
+| `data_pipeline.py` | OHLCV → 지표 계산 |
 
----
+```bash
+# 실거래 봇 실행
+python live_tools/run.py
 
-## temp/scripts/ — 연구용 스크립트 (참고용)
-
-| 파일 | 내용 | 결과 |
-|------|------|------|
-| `22_backtest_pullback.py` | Pullback 전략 검증 | BTC -72% ❌ |
-| `23_pullback_improved.py` | Pullback + BTC Gate 6변형 | 전체 탈락 ❌ |
-| `24_style_b_improved.py` | Style B (RSI+BB) 7변형 | AdaptRSI +12.9% ⚠️ |
-| `25_metalabel_train.py` | Triple-Barrier meta-label | label 불균형 ❌ |
-| `26_style_b_adptrsi_hist.py` | AdaptRSI 역사적 검증 | hist 0/10 ❌ |
-| `27_antifragile_trailing.py` | **Antifragile 발견** | BTC +132% ✅ |
-| `28_vol_expansion_breakout.py` | 변동성 압축 돌파 | -27% ❌ |
-| `29_atr_sl_tp_sweep.py` | ATR SL/TP 스윕 | -2.4% ⚠️ |
-| `30_ratio_trade.py` | ETH/BTC 비율 거래 | WR<5% ❌ |
-| `31_triple_barrier_lgbm.py` | Triple-Barrier + LightGBM | 51.5% 정확도 ⚠️ |
-| `32_antifragile_hist.py` | Antifragile 역사적 검증 | hist 9/10 ✅ → scripts/ 승격 |
-| `backtest_style_a~e.py` | A~E 스타일 탐색 | 모두 DL v17 미만 ❌ |
+# 대시보드 확인 (기본 포트 8765)
+open http://localhost:8765
+```
 
 ---
 
@@ -133,8 +149,7 @@ launchctl load ~/Library/LaunchAgents/com.connectai.tradebot.plist
 
 # Linux systemd
 sudo cp deploy/live_trader.service /etc/systemd/system/
-sudo systemctl enable live_trader
-sudo systemctl start live_trader
+sudo systemctl enable live_trader && sudo systemctl start live_trader
 
 # nohup (간단)
 bash deploy/run_paper.sh
@@ -144,6 +159,6 @@ bash deploy/run_paper.sh
 
 ## 공통 규칙
 
-- **모든 백테스트 결과에 TPD 필수 포함** (기준: TPD ≥ 1.5)
-- 신규 스크립트는 `temp/scripts/`에서 개발 후 검증 완료 시 `scripts/`로 승격
-- `src/` 파일은 프로덕션 코드 — 신중하게 수정
+- 프리셋/파라미터 변경은 `config/af_params.py` 에서만
+- 신규 스크립트는 `temp/scripts/`에서 개발 → 검증 완료 후 `scripts/` 또는 `scripts/sweeps/`로 승격
+- **모든 백테스트에 TPD 필수 포함** (기준: TPD ≥ 1.5)
