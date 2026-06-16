@@ -463,17 +463,10 @@ def main():
             all_df_cache = None  # 2026 + random 모두 사용 시 재로드 방지
 
             if args.mode in ("2026", "both"):
-                if coin == "btc":
-                    par  = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
-                    df26 = _normalize_index(par[par.index >= "2026-01-01"].copy())
-                    df26 = add_indicators(df26)
-                elif coin == "eth":
-                    df26 = _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet"))
-                    df26 = add_indicators(df26)
-                else:
-                    # SOL/XRP: 전체 CSV에서 2026 구간 슬라이스
+                # 4코인 모두 load_coin_full로 통일 (최신 CSV 반영, 기간 일관성)
+                if all_df_cache is None:
                     all_df_cache = load_coin_full(coin)
-                    df26 = all_df_cache[all_df_cache.index >= "2026-01-01"].copy()
+                df26 = all_df_cache[all_df_cache.index >= "2026-01-01"].copy()
 
                 days = (df26.index[-1] - df26.index[0]).days
                 print(f"\n{label} 2026: {df26.index[0].date()} ~ {df26.index[-1].date()}  ({days}일)")
