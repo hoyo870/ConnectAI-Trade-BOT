@@ -464,9 +464,14 @@ def main():
 
             if args.mode in ("2026", "both"):
                 # 4코인 모두 load_coin_full로 통일 (최신 CSV 반영, 기간 일관성)
+                # 2026 OOS 기간: 2026-01-01 ~ 2026-05-31 고정
+                # (6월 이후는 현재 실거래 중인 기간 → OOS 오염 방지)
                 if all_df_cache is None:
                     all_df_cache = load_coin_full(coin)
-                df26 = all_df_cache[all_df_cache.index >= "2026-01-01"].copy()
+                df26 = all_df_cache[
+                    (all_df_cache.index >= "2026-01-01") &
+                    (all_df_cache.index <  "2026-06-01")
+                ].copy()
 
                 days = (df26.index[-1] - df26.index[0]).days
                 print(f"\n{label} 2026: {df26.index[0].date()} ~ {df26.index[-1].date()}  ({days}일)")
