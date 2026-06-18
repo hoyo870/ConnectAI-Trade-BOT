@@ -62,7 +62,7 @@ PAPER_CSV_HEADER = [
 log = logging.getLogger(__name__)
 
 BARS_PER_DAY        = 288
-FETCH_LIMIT         = 600    # 신호 롤링(100) + 지표 워밍(200) + 여유
+FETCH_LIMIT         = 1000   # [US-003] EWM(com=13) RSI 수렴 안정화 (실거래-백테스트 RSI 일치도 향상)
 SIG_ROLL_WIN        = 100
 INITIAL_CAPITAL     = 10_000.0
 STOP_POLL_INTERVAL  = 2.0
@@ -141,6 +141,13 @@ DEFAULT_STATE = {
     "af_entry_atr":      0.0,   # 진입 시점 ATR (피라미딩 단계 계산용)
     "af_registered_sl":  0.0,   # 거래소에 등록된 SL 가격 (갱신 여부 판단용)
     "af_partial_taken":  False, # RSI 극단구간 절반 익절 실행 여부 (청산 시 리셋)
+    # ── [US-002] 강한 반대 신호 조기청산 ────────────────────────────────
+    "af_consecutive_reverse": 0,  # 반대 방향 신호 연속 발화 카운터
+    # ── [US-004] 연속 손실 방향 쿨링 ────────────────────────────────────
+    "af_consec_long_loss":  0,  # 롱 방향 연속 손실 횟수
+    "af_consec_short_loss": 0,  # 숏 방향 연속 손실 횟수
+    "af_long_cooling_left": 0,  # 롱 진입 차단 잔여봉
+    "af_short_cooling_left": 0, # 숏 진입 차단 잔여봉
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
@@ -155,6 +162,13 @@ AF_PARAMS = {
 
 # 거래소 emergency SL: trail_sl 대신 넓은 SL 등록 → intrabar 조기 체결 방지
 EMERGENCY_SL_ATR = 6.0
+
+# [US-002] 강한 반대 신호 조기청산: N봉 연속 반대 신호 발화 시 trail_SL 대기 없이 즉시 청산
+CONSECUTIVE_REVERSE_BARS = 2
+
+# [US-004] 연속 손실 방향 쿨링: 같은 방향 N회 연속 손실 → M봉 해당 방향 진입 차단
+CONSECUTIVE_LOSS_LIMIT  = 3
+DIRECTION_COOLING_BARS  = 20
 
 # 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) — config/af_params.py 중앙 관리
 # 실거래 전용 bb_sigma=0.5를 각 프리셋에 추가
@@ -191,6 +205,7 @@ def _clear_entry_fields(state: dict) -> None:
         "af_trail_sl", "af_peak_price", "af_pyramid_count",
         "af_current_rr", "af_entry_atr", "af_registered_sl",
         "af_partial_taken",
+        "af_consecutive_reverse",  # [US-002] 포지션 종료 시 flip 카운터 리셋
     ):
         state[key] = copy.deepcopy(DEFAULT_STATE.get(key, 0))
 
@@ -391,17 +406,26 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
     # ── 청산 체크 (trailing stop) ─────────────────────────────────────────────
     if pos != 0:
+        # [US-002] 강한 반대 신호 연속 발화 카운터
+        reverse_fired = (pos == 1 and short_ok_now) or (pos == -1 and long_ok_now)
+        if reverse_fired:
+            state["af_consecutive_reverse"] = state.get("af_consecutive_reverse", 0) + 1
+        else:
+            state["af_consecutive_reverse"] = 0
+        force_flip = state["af_consecutive_reverse"] >= CONSECUTIVE_REVERSE_BARS
+
         trail_sl  = state["af_trail_sl"]
         hold_bars = state["current_bar"] - state["entry_bar"]
         hit_stop  = (pos ==  1 and price <= trail_sl) or \
                     (pos == -1 and price >= trail_sl)
         timeout   = hold_bars >= p["max_hold_bars"]
 
-        if hit_stop or timeout:
-            reason = "trail_SL" if hit_stop else "timeout"
+        if hit_stop or timeout or force_flip:
+            reason = "trail_SL" if hit_stop else ("timeout" if timeout else "reverse_flip")
             entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or price)
             dir_str = "LONG 🟢" if pos == 1 else "SHORT 🔴"
             capital_before = state["capital"]
+            closed_pos = pos  # [US-004] 청산 전 방향 저장
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
             capital_after = state["capital"]
@@ -413,6 +437,28 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 f"PnL: {pnl_pct:+.2f}% ({pnl_usdt:+.1f} USDT)\n"
                 f"자본: {capital_before:,.0f} → {capital_after:,.0f} USDT"
             )
+            state["af_consecutive_reverse"] = 0  # 청산 시 카운터 리셋
+            # [US-004] 연속 손실 방향 쿨링 로직
+            if pnl_usdt <= 0:
+                if closed_pos == 1:
+                    state["af_consec_long_loss"]  = state.get("af_consec_long_loss", 0) + 1
+                    state["af_consec_short_loss"] = 0
+                else:
+                    state["af_consec_short_loss"] = state.get("af_consec_short_loss", 0) + 1
+                    state["af_consec_long_loss"]  = 0
+            else:
+                if closed_pos == 1:
+                    state["af_consec_long_loss"]  = 0
+                else:
+                    state["af_consec_short_loss"] = 0
+            if state.get("af_consec_long_loss", 0) >= CONSECUTIVE_LOSS_LIMIT:
+                state["af_long_cooling_left"]  = DIRECTION_COOLING_BARS
+                state["af_consec_long_loss"]   = 0
+                log.warning(f"[{coin}/AF 방향쿨링] 롱 {DIRECTION_COOLING_BARS}봉 차단 (연속{CONSECUTIVE_LOSS_LIMIT}손실)")
+            if state.get("af_consec_short_loss", 0) >= CONSECUTIVE_LOSS_LIMIT:
+                state["af_short_cooling_left"] = DIRECTION_COOLING_BARS
+                state["af_consec_short_loss"]  = 0
+                log.warning(f"[{coin}/AF 방향쿨링] 숏 {DIRECTION_COOLING_BARS}봉 차단 (연속{CONSECUTIVE_LOSS_LIMIT}손실)")
         else:
             # trailing stop 업데이트
             trail_mult = p["trail_atr_tight"] if state["af_pyramid_count"] > 0 else p["trail_atr_init"]
@@ -526,11 +572,31 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 
     # ── 신규 진입 ─────────────────────────────────────────────────────────────
     if state["position"] == 0:
+        # [US-004] 방향 쿨링 카운터 감소 (만료 시만 로그)
+        if state.get("af_long_cooling_left", 0) > 0:
+            state["af_long_cooling_left"] -= 1
+            if state["af_long_cooling_left"] == 0:
+                log.info(f"[{coin}/AF 롱쿨링 해제]")
+        if state.get("af_short_cooling_left", 0) > 0:
+            state["af_short_cooling_left"] -= 1
+            if state["af_short_cooling_left"] == 0:
+                log.info(f"[{coin}/AF 숏쿨링 해제]")
+
         trend_stable = (prev_trend == trend_str)
         if not trend_stable and (long_ok_now or short_ok_now):
             log.info(f"[{coin}/AF 진입 스킵] 트렌드 첫 전환 봉 {prev_trend}→{trend_str} — 안정화 대기")
         long_ok  = long_ok_now and trend_stable
         short_ok = short_ok_now and trend_stable
+
+        # [US-004] 쿨링 중인 방향 진입 차단
+        if state.get("af_long_cooling_left", 0) > 0:
+            if long_ok:
+                log.info(f"[{coin}/AF 진입 스킵] 롱 방향 쿨링 중 ({state['af_long_cooling_left']}봉 남음)")
+            long_ok = False
+        if state.get("af_short_cooling_left", 0) > 0:
+            if short_ok:
+                log.info(f"[{coin}/AF 진입 스킵] 숏 방향 쿨링 중 ({state['af_short_cooling_left']}봉 남음)")
+            short_ok = False
 
         direction = 1 if long_ok else (-1 if short_ok else 0)
         if direction != 0 and atr < price * 0.0015:
