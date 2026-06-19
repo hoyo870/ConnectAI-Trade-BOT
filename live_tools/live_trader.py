@@ -42,6 +42,7 @@ from exchange_client import (
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
+from strategies.antifragile import AntifragileStrategy
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 ROOT        = Path(__file__).parent.parent
@@ -163,12 +164,11 @@ AF_PARAMS = {
 # 거래소 emergency SL: trail_sl 대신 넓은 SL 등록 → intrabar 조기 체결 방지
 EMERGENCY_SL_ATR = 6.0
 
-# [US-002] 강한 반대 신호 조기청산: N봉 연속 반대 신호 발화 시 trail_SL 대기 없이 즉시 청산
-CONSECUTIVE_REVERSE_BARS = 2
-
-# [US-004] 연속 손실 방향 쿨링: 같은 방향 N회 연속 손실 → M봉 해당 방향 진입 차단
-CONSECUTIVE_LOSS_LIMIT  = 3
-DIRECTION_COOLING_BARS  = 20
+# [US-002/004] 아래 상수는 문서 참조용 — 실제 동작은 AntifragileStrategy 클래스 기본값 사용
+# 변경 시 strategies/antifragile.py의 CONSECUTIVE_REVERSE_BARS 등을 수정할 것
+CONSECUTIVE_REVERSE_BARS = 1   # strategies/antifragile.py 동기화 (2→1, 2026-06-19)
+CONSECUTIVE_LOSS_LIMIT   = 2   # strategies/antifragile.py 동기화 (3→2, 2026-06-19)
+DIRECTION_COOLING_BARS   = 10  # strategies/antifragile.py 동기화 (20→10, 2026-06-19)
 
 # 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) — config/af_params.py 중앙 관리
 # 실거래 전용 bb_sigma=0.5를 각 프리셋에 추가
@@ -404,287 +404,220 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         state["af_trail_sl"]      = (price - p["trail_atr_init"] * atr) if pos == 1 else \
                                     (price + p["trail_atr_init"] * atr)
 
-    # ── 청산 체크 (trailing stop) ─────────────────────────────────────────────
-    if pos != 0:
-        # [US-002] 강한 반대 신호 연속 발화 카운터
-        reverse_fired = (pos == 1 and short_ok_now) or (pos == -1 and long_ok_now)
-        if reverse_fired:
-            state["af_consecutive_reverse"] = state.get("af_consecutive_reverse", 0) + 1
-        else:
-            state["af_consecutive_reverse"] = 0
-        force_flip = state["af_consecutive_reverse"] >= CONSECUTIVE_REVERSE_BARS
+    # ── AntifragileStrategy로 신호 처리 ──────────────────────────────────────────
+    strategy = AntifragileStrategy(p)
+    strategy.load_state(state)
+    tick_result = strategy.process_tick(price, atr, rsi, trend_up, trend_down)
 
-        trail_sl  = state["af_trail_sl"]
-        hold_bars = state["current_bar"] - state["entry_bar"]
-        hit_stop  = (pos ==  1 and price <= trail_sl) or \
-                    (pos == -1 and price >= trail_sl)
-        timeout   = hold_bars >= p["max_hold_bars"]
+    for event in tick_result["events"]:
 
-        if hit_stop or timeout or force_flip:
-            reason = "trail_SL" if hit_stop else ("timeout" if timeout else "reverse_flip")
-            entry_price = float(state.get("avg_entry_price") or state.get("entry_price") or price)
-            dir_str = "LONG 🟢" if pos == 1 else "SHORT 🔴"
-            capital_before = state["capital"]
-            closed_pos = pos  # [US-004] 청산 전 방향 저장
+        # ── 청산 이벤트 ────────────────────────────────────────────────────────
+        if event["type"] == "close":
+            reason      = event["reason"]
+            closed_pos  = event["direction"]
+            dir_str     = "LONG 🟢" if closed_pos == 1 else "SHORT 🔴"
+            entry_logged = float(state.get("avg_entry_price") or state.get("entry_price") or price)
+            cap_before  = state["capital"]
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
-            capital_after = state["capital"]
-            pnl_usdt = capital_after - capital_before
-            pnl_pct  = (capital_after / (capital_before + 1e-9) - 1) * 100
+            cap_after  = state["capital"]
+            pnl_usdt   = cap_after - cap_before
+            pnl_pct    = (cap_after / (cap_before + 1e-9) - 1) * 100
             send_trade_alert(
                 f"📤 <b>{'[PAPER] ' if paper_mode else ''}[{coin}/AF] 청산</b> [{reason}] {dir_str}\n"
-                f"진입가: {entry_price:,.4f} → 청산가: {price:,.4f}\n"
+                f"진입가: {entry_logged:,.4f} → 청산가: {price:,.4f}\n"
                 f"PnL: {pnl_pct:+.2f}% ({pnl_usdt:+.1f} USDT)\n"
-                f"자본: {capital_before:,.0f} → {capital_after:,.0f} USDT"
+                f"자본: {cap_before:,.0f} → {cap_after:,.0f} USDT"
             )
-            state["af_consecutive_reverse"] = 0  # 청산 시 카운터 리셋
-            # [US-004] 연속 손실 방향 쿨링 로직
+            # [US-004] 실제 pnl_usdt 기반으로 쿨링 카운터 재계산 (추정치 오버라이드)
+            strategy.consec_rev = 0
             if pnl_usdt <= 0:
-                if closed_pos == 1:
-                    state["af_consec_long_loss"]  = state.get("af_consec_long_loss", 0) + 1
-                    state["af_consec_short_loss"] = 0
-                else:
-                    state["af_consec_short_loss"] = state.get("af_consec_short_loss", 0) + 1
-                    state["af_consec_long_loss"]  = 0
+                if closed_pos == 1: strategy.csl_long += 1;  strategy.csl_short = 0
+                else:               strategy.csl_short += 1; strategy.csl_long  = 0
             else:
-                if closed_pos == 1:
-                    state["af_consec_long_loss"]  = 0
-                else:
-                    state["af_consec_short_loss"] = 0
-            if state.get("af_consec_long_loss", 0) >= CONSECUTIVE_LOSS_LIMIT:
-                state["af_long_cooling_left"]  = DIRECTION_COOLING_BARS
-                state["af_consec_long_loss"]   = 0
-                log.warning(f"[{coin}/AF 방향쿨링] 롱 {DIRECTION_COOLING_BARS}봉 차단 (연속{CONSECUTIVE_LOSS_LIMIT}손실)")
-            if state.get("af_consec_short_loss", 0) >= CONSECUTIVE_LOSS_LIMIT:
-                state["af_short_cooling_left"] = DIRECTION_COOLING_BARS
-                state["af_consec_short_loss"]  = 0
-                log.warning(f"[{coin}/AF 방향쿨링] 숏 {DIRECTION_COOLING_BARS}봉 차단 (연속{CONSECUTIVE_LOSS_LIMIT}손실)")
-        else:
-            # trailing stop 업데이트
-            trail_mult = p["trail_atr_tight"] if state["af_pyramid_count"] > 0 else p["trail_atr_init"]
-            entry_atr_saved = state.get("af_entry_atr", atr) or atr
-            effective_atr = max(atr, entry_atr_saved * 0.6)  # 진입 ATR 60% 미만으로 SL 좁아지지 않도록
-            if pos == 1:
-                state["af_peak_price"] = max(state["af_peak_price"], price)
-                new_trail = state["af_peak_price"] - trail_mult * effective_atr
-                state["af_trail_sl"] = max(state["af_trail_sl"], new_trail)
-            else:
-                state["af_peak_price"] = min(state["af_peak_price"], price)
-                new_trail = state["af_peak_price"] + trail_mult * effective_atr
-                state["af_trail_sl"] = min(state["af_trail_sl"], new_trail)
+                if closed_pos == 1: strategy.csl_long  = 0
+                else:               strategy.csl_short = 0
+            if strategy.csl_long  >= strategy.loss_limit:
+                strategy.cl_long  = strategy.cool_bars; strategy.csl_long  = 0
+                log.warning(f"[{coin}/AF 방향쿨링] 롱 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
+            if strategy.csl_short >= strategy.loss_limit:
+                strategy.cl_short = strategy.cool_bars; strategy.csl_short = 0
+                log.warning(f"[{coin}/AF 방향쿨링] 숏 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
 
-            # ── 절반 익절 (RSI 극단구간) ────────────────────────────────────────
-            if not state.get("af_partial_taken", False):
-                partial_ok = (pos == 1 and rsi >= rsi_hi) or (pos == -1 and rsi <= rsi_lo)
-                if partial_ok:
-                    _dec    = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
-                    half_qty = round(state["entry_qty"] / 2, _dec)
-                    min_q   = MIN_QTY()
-                    if half_qty >= min_q and (state["entry_qty"] - half_qty) >= min_q:
-                        avg_e = float(state.get("avg_entry_price") or state.get("entry_price") or price)
-                        prr   = state["entry_rr"] * 0.5
-                        ppnl  = max(pos * (price - avg_e) / (avg_e + 1e-9) * lev * prr, -prr)
-                        cap_b = state["capital"]
-                        log.info(
-                            f"[{coin}/AF 절반익절] RSI={rsi:.1f} "
-                            f"qty {state['entry_qty']} → {state['entry_qty'] - half_qty:.{_dec}f} "
-                            f"PnL={ppnl:+.4f}"
-                        )
-                        success = True
-                        if not paper_mode:
-                            try:
-                                place_market_order(exchange, "sell" if pos == 1 else "buy", half_qty, reduce_only=True)
-                            except Exception as _pe:
-                                log.error(f"[{coin}/AF 절반익절 실패] {_pe}")
-                                success = False
-                        if success:
-                            state["capital"]         *= (1 + ppnl)
-                            state["entry_qty"]        -= half_qty
-                            state["entry_rr"]         *= 0.5
-                            state["af_current_rr"]     = state["entry_rr"]
-                            state["af_partial_taken"]  = True
-                            send_trade_alert(
-                                f"✂️ <b>[{coin}/AF] 절반 익절</b>\n"
-                                f"RSI={rsi:.1f} | 가격={price:,.4f}\n"
-                                f"익절qty={half_qty} | PnL={ppnl:+.4f}\n"
-                                f"자본: {cap_b:,.0f} → {state['capital']:,.0f} USDT"
-                            )
-                    else:
-                        log.info(f"[{coin}/AF 절반익절 스킵] half_qty={half_qty} < min_qty={min_q}")
-
-            # 피라미딩 체크 (유리방향 N×ATR마다 추가)
-            entry_atr = state.get("af_entry_atr", atr) or atr
-            base_entry = float(state.get("avg_entry_price") or state.get("entry_price") or price)
-            favorable = pos * (price - base_entry) / (entry_atr + 1e-9)
-            next_lvl  = (state["af_pyramid_count"] + 1) * p["atr_add_step"]
-            rsi_ok_pyr = (pos == 1 and rsi < rsi_hi) or (pos == -1 and rsi > rsi_lo)
-            if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl and not rsi_ok_pyr:
-                log.info(f"[{coin}/AF 피라미딩 RSI차단] RSI={rsi:.1f} 극단구간 스킵")
-            if state["af_pyramid_count"] < p["add_levels"] and favorable >= next_lvl and rsi_ok_pyr:
-                pyramid_snapshot = {
-                    "entry_price":       state.get("entry_price", 0.0),
-                    "avg_entry_price":   state.get("avg_entry_price", 0.0),
-                    "entry_qty":         state.get("entry_qty", 0.0),
-                    "entry_rr":          state.get("entry_rr", 0.0),
-                    "af_trail_sl":       state.get("af_trail_sl", 0.0),
-                    "af_pyramid_count":  state.get("af_pyramid_count", 0),
-                    "af_current_rr":     state.get("af_current_rr", 0.0),
-                    "af_registered_sl":  state.get("af_registered_sl", 0.0),
-                }
-                add_qty = calc_qty(state["capital"], p["rr_add"], lev, price)
-                state["af_pyramid_count"] += 1
-                state["af_current_rr"]    += p["rr_add"]
-                state["entry_rr"]          = state["af_current_rr"]
-                old_qty = float(state.get("entry_qty") or 0.0)
-                old_avg = float(state.get("avg_entry_price") or state.get("entry_price") or price)
-                state["entry_qty"] = old_qty + add_qty
-                state["avg_entry_price"] = (
-                    ((old_avg * old_qty) + (price * add_qty)) / state["entry_qty"]
-                    if state["entry_qty"] > 0 else price
-                )
-                state["entry_price"] = state["avg_entry_price"]
-                if pos == 1:
-                    state["af_trail_sl"] = max(state["af_trail_sl"], price - p["trail_atr_tight"] * atr)
-                else:
-                    state["af_trail_sl"] = min(state["af_trail_sl"], price + p["trail_atr_tight"] * atr)
-
-                log.info(f"[{coin}/AF 피라미딩 #{state['af_pyramid_count']}] "
-                         f"favorable={favorable:.2f}ATR | rr={state['af_current_rr']:.2f} | "
-                         f"trail_sl={state['af_trail_sl']:,.4f}")
-
+        # ── 절반 익절 이벤트 ────────────────────────────────────────────────────
+        elif event["type"] == "partial":
+            _dec     = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
+            half_qty = round(float(state.get("entry_qty", 0)) * 0.5, _dec)
+            min_q    = MIN_QTY()
+            if half_qty >= min_q and (float(state.get("entry_qty", 0)) - half_qty) >= min_q:
+                prr  = event["rr"]
+                ppnl = max(event["pnl_raw"] * lev * prr, -prr)
+                cap_b = state["capital"]
+                log.info(f"[{coin}/AF 절반익절] RSI={rsi:.1f} qty {state['entry_qty']} "
+                         f"→ {float(state['entry_qty']) - half_qty:.{_dec}f} PnL={ppnl:+.4f}")
+                success = True
                 if not paper_mode:
                     try:
-                        if add_qty < MIN_QTY():
-                            raise ValueError(f"최소수량 미달: {add_qty} < {MIN_QTY()}")
-                        side = "buy" if pos == 1 else "sell"
-                        place_market_order(exchange, side, add_qty)
-                    except Exception as e:
-                        state.update(pyramid_snapshot)
-                        log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
-                    else:
-                        send_trade_alert(
-                            f"➕ <b>[{coin}/AF] 피라미딩 #{state['af_pyramid_count']}</b>\n"
-                            f"가격: {price:,.4f} | 추가수량: {add_qty}"
-                        )
+                        place_market_order(exchange, "sell" if state["position"] == 1 else "buy",
+                                           half_qty, reduce_only=True)
+                    except Exception as _pe:
+                        log.error(f"[{coin}/AF 절반익절 실패] {_pe}")
+                        success = False
+                        strategy.rr      *= 2   # 클래스 내부 rr 롤백
+                        strategy.partial  = False
+                if success:
+                    state["capital"]        *= (1 + ppnl)
+                    state["entry_qty"]       -= half_qty
+                    state["entry_rr"]        *= 0.5
+                    state["af_current_rr"]    = state["entry_rr"]
+                    state["af_partial_taken"] = True
+                    send_trade_alert(
+                        f"✂️ <b>[{coin}/AF] 절반 익절</b>\n"
+                        f"RSI={rsi:.1f} | 가격={price:,.4f}\n"
+                        f"익절qty={half_qty} | PnL={ppnl:+.4f}\n"
+                        f"자본: {cap_b:,.0f} → {state['capital']:,.0f} USDT"
+                    )
+            else:
+                log.info(f"[{coin}/AF 절반익절 스킵] half_qty={half_qty} < min_qty={min_q}")
+                strategy.rr     *= 2   # 클래스 내부 rr 롤백
+                strategy.partial = False
 
-            # trail_sl은 소프트웨어(봉 close 기준)로만 체크 — 거래소 SL 업데이트 없음
-            # emergency SL은 진입 시 1회만 등록 (intrabar 조기 체결 방지)
+        # ── 피라미딩 이벤트 ─────────────────────────────────────────────────────
+        elif event["type"] == "pyramid":
+            pyramid_snapshot = {k: state.get(k) for k in (
+                "entry_price", "avg_entry_price", "entry_qty", "entry_rr",
+                "af_trail_sl", "af_pyramid_count", "af_current_rr", "af_registered_sl",
+            )}
+            add_qty = calc_qty(state["capital"], p["rr_add"], lev, price)
+            state["af_pyramid_count"] = event["add_cnt"]
+            state["af_current_rr"]    = event["new_rr"]
+            state["entry_rr"]         = event["new_rr"]
+            state["avg_entry_price"]  = event["new_avg"]
+            state["entry_price"]      = event["new_avg"]
+            state["entry_qty"]        = float(state.get("entry_qty", 0)) + add_qty
+            log.info(f"[{coin}/AF 피라미딩 #{event['add_cnt']}] "
+                     f"rr={event['new_rr']:.2f} | trail_sl={strategy.trail_sl:,.4f}")
+            if not paper_mode:
+                try:
+                    if add_qty < MIN_QTY():
+                        raise ValueError(f"최소수량 미달: {add_qty} < {MIN_QTY()}")
+                    place_market_order(exchange, "buy" if state["position"] == 1 else "sell", add_qty)
+                except Exception as e:
+                    state.update({k: v for k, v in pyramid_snapshot.items() if v is not None})
+                    # 클래스 내부 상태 롤백
+                    strategy.add_cnt   -= 1
+                    strategy.rr        -= p["rr_add"]
+                    log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
+                else:
+                    send_trade_alert(f"➕ <b>[{coin}/AF] 피라미딩 #{event['add_cnt']}</b>\n"
+                                     f"가격: {price:,.4f} | 추가수량: {add_qty}")
 
-    # ── 신규 진입 ─────────────────────────────────────────────────────────────
-    if state["position"] == 0:
-        # [US-004] 방향 쿨링 카운터 감소 (만료 시만 로그)
-        if state.get("af_long_cooling_left", 0) > 0:
-            state["af_long_cooling_left"] -= 1
-            if state["af_long_cooling_left"] == 0:
-                log.info(f"[{coin}/AF 롱쿨링 해제]")
-        if state.get("af_short_cooling_left", 0) > 0:
-            state["af_short_cooling_left"] -= 1
-            if state["af_short_cooling_left"] == 0:
-                log.info(f"[{coin}/AF 숏쿨링 해제]")
-
-        trend_stable = (prev_trend == trend_str)
-        if not trend_stable and (long_ok_now or short_ok_now):
-            log.info(f"[{coin}/AF 진입 스킵] 트렌드 첫 전환 봉 {prev_trend}→{trend_str} — 안정화 대기")
-        long_ok  = long_ok_now and trend_stable
-        short_ok = short_ok_now and trend_stable
-
-        # [US-004] 쿨링 중인 방향 진입 차단
-        if state.get("af_long_cooling_left", 0) > 0:
-            if long_ok:
-                log.info(f"[{coin}/AF 진입 스킵] 롱 방향 쿨링 중 ({state['af_long_cooling_left']}봉 남음)")
-            long_ok = False
-        if state.get("af_short_cooling_left", 0) > 0:
-            if short_ok:
-                log.info(f"[{coin}/AF 진입 스킵] 숏 방향 쿨링 중 ({state['af_short_cooling_left']}봉 남음)")
-            short_ok = False
-
-        direction = 1 if long_ok else (-1 if short_ok else 0)
-        if direction != 0 and atr < price * 0.0015:
-            log.info(f"[{coin}/AF 진입 스킵] ATR={atr:.4f} < 가격×0.15% ({price * 0.0015:.4f}) — 횡보 구간")
-            direction = 0
-        if direction != 0:
-            dir_str    = "LONG 🟢" if direction == 1 else "SHORT 🔴"
-            init_trail = (price - p["trail_atr_init"] * atr) if direction == 1 else \
-                         (price + p["trail_atr_init"] * atr)
-
-            state["position"]          = direction
-            state["entry_price"]       = price
-            state["avg_entry_price"]   = price
-            state["entry_qty"]         = calc_qty(state["capital"], p["rr_base"], lev, price)
-            state["entry_time"]        = now_str
-            state["entry_lev"]         = lev
-            state["entry_rr"]          = p["rr_base"]
-            state["entry_bar"]         = state["current_bar"]
-            state["entry_sig_long"]    = rsi
-            state["entry_sig_short"]   = atr
-            state["af_trail_sl"]       = init_trail
-            state["af_peak_price"]     = price
-            state["af_pyramid_count"]  = 0
-            state["af_current_rr"]     = p["rr_base"]
-            state["af_entry_atr"]      = atr
-
+        # ── 진입 이벤트 ─────────────────────────────────────────────────────────
+        elif event["type"] == "entry":
+            direction = event["direction"]
+            dir_str   = "LONG 🟢" if direction == 1 else "SHORT 🔴"
+            if prev_trend != trend_str and (long_ok_now or short_ok_now):
+                log.info(f"[{coin}/AF 진입] 트렌드 {prev_trend}→{trend_str} 전환 후 안정화 봉 완료")
+            state["position"]         = direction
+            state["entry_price"]      = price
+            state["avg_entry_price"]  = price
+            state["entry_qty"]        = calc_qty(state["capital"], p["rr_base"], lev, price)
+            state["entry_time"]       = now_str
+            state["entry_lev"]        = lev
+            state["entry_rr"]         = p["rr_base"]
+            state["entry_bar"]        = state["current_bar"]
+            state["entry_sig_long"]   = rsi
+            state["entry_sig_short"]  = atr
+            state["af_trail_sl"]      = event["trail_sl"]
+            state["af_peak_price"]    = price
+            state["af_pyramid_count"] = 0
+            state["af_current_rr"]    = p["rr_base"]
+            state["af_entry_atr"]     = atr
             log.info(f"[{coin}/AF {'PAPER ' if paper_mode else ''}진입] {dir_str} | "
                      f"가격={price:,.4f} | RSI={rsi:.1f}({trend_str}) | "
-                     f"ATR={atr:.4f} | trail_sl={init_trail:,.4f}")
+                     f"ATR={atr:.4f} | trail_sl={event['trail_sl']:,.4f}")
             send_trade_alert(
                 f"📥 <b>{'[PAPER] ' if paper_mode else ''}[{coin}/AF] 진입</b> {dir_str}\n"
                 f"가격: {price:,.4f} | RSI: {rsi:.1f}({trend_str}) | ATR: {atr:.4f}\n"
-                f"trail_SL: {init_trail:,.4f} | 자본: {state['capital']:,.0f} USDT"
+                f"trail_SL: {event['trail_sl']:,.4f} | 자본: {state['capital']:,.0f} USDT"
             )
-
             if not paper_mode:
                 try:
                     set_leverage(exchange, lev)
-                    qty = calc_qty(state["capital"], p["rr_base"], lev, price)
+                    qty = state["entry_qty"]
                     if qty < MIN_QTY():
                         log.warning(f"[{coin}/AF] 최소수량 미달: {qty} — 진입 취소")
                         _clear_entry_fields(state)
+                        strategy.pos = 0; strategy.avg_entry = 0.0
+                        strategy.rr = p["rr_base"]; strategy.add_cnt = 0
                     else:
-                        side = "buy" if direction == 1 else "sell"
-                        place_market_order(exchange, side, qty)
+                        place_market_order(exchange, "buy" if direction == 1 else "sell", qty)
                         time.sleep(1)
                         try:
                             filled = get_position(exchange)
                             if filled["side"] and filled["entry_price"] > 0:
                                 actual_px = float(filled["entry_price"])
                                 slip_pct  = (actual_px - price) / price * 100 * direction
-                                state["entry_price"]           = actual_px
-                                state["avg_entry_price"]       = actual_px
-                                state["entry_qty"]             = float(filled.get("size") or state.get("entry_qty") or qty)
-                                state["_entry_signal_price"]   = price
-                                state["_entry_slippage_pct"]   = round(slip_pct, 4)
+                                state["entry_price"]         = actual_px
+                                state["avg_entry_price"]     = actual_px
+                                state["entry_qty"]           = float(filled.get("size") or state.get("entry_qty") or qty)
+                                state["_entry_signal_price"] = price
+                                state["_entry_slippage_pct"] = round(slip_pct, 4)
+                                strategy.avg_entry = actual_px
                                 log.info(f"[{coin}/AF] 체결확인 | 신호={price:,.4f} 체결={actual_px:,.4f} 슬리피지={slip_pct:+.3f}%")
                         except Exception as e2:
                             log.warning(f"[{coin}/AF] 체결확인 실패: {e2}")
-                        # 진입 직후 거래소 emergency SL 등록
-                        # trail_sl 대신 넓은 emergency SL — intrabar 조기 체결 방지
-                        # 소프트웨어 trail_sl 체크는 봉 close 기준으로 별도 동작
+                        # 진입 직후 거래소 emergency SL 등록 (trail_sl 대신 넓은 SL)
                         try:
-                            entry_px = state.get("avg_entry_price") or price
-                            entry_atr_val = state.get("af_entry_atr") or atr
-                            if direction == 1:
-                                emergency_sl = entry_px - EMERGENCY_SL_ATR * entry_atr_val
-                            else:
-                                emergency_sl = entry_px + EMERGENCY_SL_ATR * entry_atr_val
+                            entry_px     = float(state.get("avg_entry_price") or price)
+                            entry_atr_v  = float(state.get("af_entry_atr") or atr)
+                            emergency_sl = (entry_px - EMERGENCY_SL_ATR * entry_atr_v) if direction == 1 \
+                                           else (entry_px + EMERGENCY_SL_ATR * entry_atr_v)
                             set_position_stop_loss(exchange, emergency_sl)
                             state["af_registered_sl"] = emergency_sl
-                            log.info(f"[{coin}/AF emergency SL등록] {emergency_sl:,.4f} (trail={state['af_trail_sl']:,.4f})")
+                            log.info(f"[{coin}/AF emergency SL등록] {emergency_sl:,.4f} "
+                                     f"(trail={strategy.trail_sl:,.4f})")
                         except Exception as e_sl:
                             log.warning(f"[{coin}/AF SL등록 실패] {e_sl}")
                 except Exception as e:
                     log.error(f"[{coin}/AF] 진입 주문 실패: {e}")
-                    # 주문이 거래소에 수락됐을 수 있으므로 실제 포지션 확인 후 결정
                     try:
                         orphan = get_position(exchange)
                         if orphan["side"] and orphan["size"] > 0:
-                            log.warning(f"[{coin}/AF] 주문 예외 후 거래소 포지션 감지 — state 복원 (orphan)")
+                            log.warning(f"[{coin}/AF] 주문 예외 후 거래소 포지션 감지 — state 복원")
                             state["entry_qty"]       = orphan["size"]
                             state["avg_entry_price"] = float(orphan["entry_price"] or state.get("entry_price", 0))
                         else:
                             _clear_entry_fields(state)
+                            strategy.pos = 0; strategy.avg_entry = 0.0
                     except Exception as e2:
-                        log.warning(f"[{coin}/AF] orphan 포지션 확인 실패: {e2}")
+                        log.warning(f"[{coin}/AF] orphan 확인 실패: {e2}")
                         _clear_entry_fields(state)
+                        strategy.pos = 0; strategy.avg_entry = 0.0
+
+    # ── 쿨링 해제 로그 (진입 차단 해제 시만) ─────────────────────────────────────
+    if strategy.cl_long == 0 and state.get("af_long_cooling_left", 0) > 0:
+        log.info(f"[{coin}/AF 롱쿨링 해제]")
+    if strategy.cl_short == 0 and state.get("af_short_cooling_left", 0) > 0:
+        log.info(f"[{coin}/AF 숏쿨링 해제]")
+
+    # ── state 동기화 (AntifragileStrategy → state dict) ──────────────────────
+    state["position"]               = strategy.pos
+    state["last_trend"]             = strategy.prev_trend
+    state["af_trail_sl"]            = strategy.trail_sl
+    state["af_peak_price"]          = strategy.peak_px
+    state["af_consecutive_reverse"] = strategy.consec_rev
+    state["af_consec_long_loss"]    = strategy.csl_long
+    state["af_consec_short_loss"]   = strategy.csl_short
+    state["af_long_cooling_left"]   = strategy.cl_long
+    state["af_short_cooling_left"]  = strategy.cl_short
+    if strategy.pos != 0:
+        state["af_current_rr"]    = strategy.rr
+        state["entry_rr"]         = strategy.rr
+        state["af_pyramid_count"] = strategy.add_cnt
+        state["af_entry_atr"]     = strategy.entry_atr
+        state["af_partial_taken"] = strategy.partial
+        state["avg_entry_price"]  = strategy.avg_entry
 
     return state
 

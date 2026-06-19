@@ -29,12 +29,12 @@ sys.path.insert(0, "src")
 import numpy as np
 import pandas as pd
 from config.af_params import FEE_TOTAL, DEFAULT_PARAMS
+from strategies.antifragile import (
+    AntifragileStrategy,
+    CONSECUTIVE_REVERSE_BARS, CONSECUTIVE_LOSS_LIMIT, DIRECTION_COOLING_BARS,
+)
 
-# ── 파라미터 ──────────────────────────────────────────────────────────────────
-CONSECUTIVE_REVERSE_BARS = 2
-CONSECUTIVE_LOSS_LIMIT   = 3
-DIRECTION_COOLING_BARS   = 20
-BB_SIGMA                 = 0.5   # 1h BB 횡보 구역 폭
+BB_SIGMA = 0.5   # 1h BB 횡보 구역 폭
 
 
 # ── 지표 계산 (live_trader _compute_af_indicators 완벽 모방) ──────────────────
@@ -73,14 +73,15 @@ def add_indicators_exact(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── 핵심 백테스트 엔진 ────────────────────────────────────────────────────────
+# ── 핵심 백테스트 엔진 (AntifragileStrategy 사용) ─────────────────────────────
 def run_af_exact(
     df: pd.DataFrame,
     initial_capital: float = 270.76,
     p: dict = None,
 ) -> dict:
     """
-    live_trader.py process_tick_af를 완벽히 모방.
+    AntifragileStrategy 클래스를 사용하는 백테스트 엔진.
+    live_trader.py와 동일한 신호 로직을 strategies/antifragile.py에서 공유.
     p: DEFAULT_PARAMS 기반 dict
     """
     if p is None:
@@ -90,197 +91,73 @@ def run_af_exact(
     df.dropna(subset=["_rsi", "_atr"], inplace=True)
     df = df.reset_index(drop=True)
 
-    # 파라미터 단축
-    dt_lo, dt_hi = p["dt_rsi_lo"], p["dt_rsi_hi"]
-    rg_lo, rg_hi = p["rg_rsi_lo"], p["rg_rsi_hi"]
-    ut_lo, ut_hi = p["ut_rsi_lo"], p["ut_rsi_hi"]
-    lev          = p.get("leverage", 7)
-    rr_base      = p["rr_base"]
-    trail_init   = p["trail_atr_init"]
-    trail_tight  = p["trail_atr_tight"]
-    add_step     = p["atr_add_step"]
-    add_lvl      = p["add_levels"]
-    max_hold     = p.get("max_hold_bars", 288)
+    lev      = p.get("leverage", 7)
+    strategy = AntifragileStrategy(p)
 
-    # state
     capital      = initial_capital
     peak_cap     = initial_capital
-    pos          = 0
-    entry_price  = 0.0;  avg_entry = 0.0
-    entry_atr    = 0.0;  rr        = rr_base
-    add_cnt      = 0;    trail_sl  = 0.0;  peak_px = 0.0
-    entry_bar    = 0;    partial   = False
-
-    # US-002
-    consec_rev   = 0
-    # US-004
-    cl_long = 0; cl_short = 0
-    csl_long = 0; csl_short = 0
-
-    # 트렌드 안정화
-    prev_trend   = "RG"
-
     trade_log    = []
     equity_curve = [capital]
 
-    def get_trend(row):
-        tup = bool(row["_trend_up"]); tdn = bool(row["_trend_down"])
-        return "DN" if tdn else ("UP" if tup else "RG")
-
-    def get_thresholds(trend):
-        if trend == "DN": return dt_lo, dt_hi
-        if trend == "UP": return ut_lo, ut_hi
-        return rg_lo, rg_hi
-
     for idx in range(1, len(df)):
-        row   = df.iloc[idx]
-        price = float(row["close"])
-        atr   = float(row["_atr"])
-        rsi   = float(row["_rsi"])
+        row       = df.iloc[idx]
+        price     = float(row["close"])
+        atr       = float(row["_atr"])
+        rsi       = float(row["_rsi"])
+        trend_up  = bool(row["_trend_up"])
+        trend_dn  = bool(row["_trend_down"])
 
-        trend    = get_trend(row)
-        rsi_lo, rsi_hi = get_thresholds(trend)
+        result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn)
 
-        long_ok_now  = rsi <= rsi_lo
-        short_ok_now = (rsi >= rsi_hi) and not long_ok_now
-
-        # ── 청산 체크 ────────────────────────────────────────────────────────
-        if pos != 0:
-            # US-002 reverse_flip
-            rev_fired = (pos == 1 and short_ok_now) or (pos == -1 and long_ok_now)
-            consec_rev = consec_rev + 1 if rev_fired else 0
-            force_flip = consec_rev >= CONSECUTIVE_REVERSE_BARS
-
-            hold     = idx - entry_bar
-            hit_stop = (pos == 1 and price <= trail_sl) or (pos == -1 and price >= trail_sl)
-            timeout  = hold >= max_hold
-
-            if hit_stop or timeout or force_flip:
-                reason = "trail_SL" if hit_stop else ("timeout" if timeout else "reverse_flip")
-                raw    = pos * (price - avg_entry) / (avg_entry + 1e-9)
-                pnl    = max(raw * lev * rr, -rr) - FEE_TOTAL
-                capital *= (1 + pnl)
-                peak_cap = max(peak_cap, capital)
+        for event in result["events"]:
+            if event["type"] == "close":
+                pnl = max(event["pnl_raw"] * lev * event["rr"], -event["rr"]) - FEE_TOTAL
+                capital  *= (1 + pnl)
+                peak_cap  = max(peak_cap, capital)
                 trade_log.append({
-                    "pnl": pnl, "direction": pos, "reason": reason,
-                    "capital": round(capital, 2),
-                    "entry": round(avg_entry, 6), "exit": round(price, 6),
+                    "pnl":       pnl,
+                    "direction": event["direction"],
+                    "reason":    event["reason"],
+                    "capital":   round(capital, 2),
+                    "entry":     round(event["entry_price"], 6),
+                    "exit":      round(event["exit_price"],  6),
                 })
-                closed_pos = pos
-                # US-004 쿨링 카운터
-                if pnl <= 0:
-                    if closed_pos == 1: csl_long += 1;  csl_short = 0
-                    else:               csl_short += 1; csl_long  = 0
-                else:
-                    if closed_pos == 1: csl_long  = 0
-                    else:               csl_short = 0
-                if csl_long  >= CONSECUTIVE_LOSS_LIMIT: cl_long  = DIRECTION_COOLING_BARS; csl_long  = 0
-                if csl_short >= CONSECUTIVE_LOSS_LIMIT: cl_short = DIRECTION_COOLING_BARS; csl_short = 0
+            elif event["type"] == "partial":
+                ppnl     = max(event["pnl_raw"] * lev * event["rr"], -event["rr"])
+                capital *= (1 + ppnl)
 
-                pos = 0; entry_price = 0; avg_entry = 0; rr = rr_base
-                add_cnt = 0; trail_sl = 0; peak_px = 0; partial = False; consec_rev = 0
-
-            else:
-                # trailing stop 업데이트
-                eff_atr    = max(atr, entry_atr * 0.6)
-                trail_mult = trail_tight if add_cnt > 0 else trail_init
-                if pos == 1:
-                    peak_px  = max(peak_px, price)
-                    trail_sl = max(trail_sl, peak_px - trail_mult * eff_atr)
-                else:
-                    peak_px  = min(peak_px, price)
-                    trail_sl = min(trail_sl, peak_px + trail_mult * eff_atr)
-
-                # 절반 익절 (live_trader 동일)
-                if not partial:
-                    p_ok = (pos == 1 and rsi >= rsi_hi) or (pos == -1 and rsi <= rsi_lo)
-                    if p_ok:
-                        prr  = rr * 0.5
-                        ppnl = max(pos * (price - avg_entry) / (avg_entry + 1e-9) * lev * prr, -prr)
-                        capital *= (1 + ppnl)
-                        rr     *= 0.5   # 남은 절반만 추적
-                        partial = True
-
-                # 피라미딩 (RSI 극단구간 차단)
-                favorable  = pos * (price - avg_entry) / (entry_atr + 1e-9)
-                next_lvl   = (add_cnt + 1) * add_step
-                rsi_ok_pyr = (pos == 1 and rsi < rsi_hi) or (pos == -1 and rsi > rsi_lo)
-                if add_cnt < add_lvl and favorable >= next_lvl and rsi_ok_pyr:
-                    old_qty = rr / rr_base        # 가중치 비례 (수량 대신 rr 비례)
-                    add_rr  = p["rr_add"]
-                    new_qty = old_qty + add_rr / rr_base
-                    avg_entry = (avg_entry * old_qty + price * (add_rr / rr_base)) / new_qty
-                    rr     += add_rr
-                    add_cnt += 1
-                    if pos == 1: trail_sl = max(trail_sl, price - trail_tight * atr)
-                    else:        trail_sl = min(trail_sl, price + trail_tight * atr)
-
-        # ── 신규 진입 ────────────────────────────────────────────────────────
-        if pos == 0:
-            # US-004 쿨링 카운터 감소
-            if cl_long  > 0: cl_long  -= 1
-            if cl_short > 0: cl_short -= 1
-
-            # 트렌드 안정화 (첫 전환 봉 차단)
-            trend_stable = (prev_trend == trend)
-            long_ok  = long_ok_now  and trend_stable
-            short_ok = short_ok_now and trend_stable
-
-            # US-004 쿨링 차단
-            if cl_long  > 0: long_ok  = False
-            if cl_short > 0: short_ok = False
-
-            direction = 1 if long_ok else (-1 if short_ok else 0)
-
-            # ATR 필터
-            if direction != 0 and atr < price * 0.0015:
-                direction = 0
-
-            if direction != 0:
-                pos        = direction
-                entry_price = price
-                avg_entry  = price
-                entry_atr  = atr
-                rr         = rr_base
-                add_cnt    = 0
-                partial    = False
-                consec_rev = 0
-                peak_px    = price
-                entry_bar  = idx
-                trail_sl   = (price - trail_init * atr) if pos == 1 else (price + trail_init * atr)
-
-        prev_trend = trend
-        # equity 업데이트
-        if pos != 0:
-            unr = pos * (price - avg_entry) / (avg_entry + 1e-9)
-            eq  = capital * (1 + unr * lev * rr)
+        # equity curve (미실현 포함)
+        if strategy.pos != 0:
+            unr = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
+            eq  = capital * (1 + unr * lev * strategy.rr)
         else:
-            eq  = capital
+            eq = capital
         peak_cap = max(peak_cap, eq)
         equity_curve.append(eq)
 
     # 미결 포지션 강제 청산
-    if pos != 0 and len(df) > 0:
-        price  = float(df.iloc[-1]["close"])
-        raw    = pos * (price - avg_entry) / (avg_entry + 1e-9)
-        pnl    = max(raw * lev * rr, -rr) - FEE_TOTAL
+    if strategy.pos != 0 and len(df) > 0:
+        price = float(df.iloc[-1]["close"])
+        raw   = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
+        pnl   = max(raw * lev * strategy.rr, -strategy.rr) - FEE_TOTAL
         capital *= (1 + pnl)
-        trade_log.append({"pnl": pnl, "direction": pos, "reason": "end", "capital": round(capital,2)})
+        trade_log.append({"pnl": pnl, "direction": strategy.pos, "reason": "end",
+                           "capital": round(capital, 2)})
 
     # 메트릭 계산
     wins   = [t for t in trade_log if t["pnl"] > 0]
     losses = [t for t in trade_log if t["pnl"] <= 0]
     n      = len(trade_log)
     total_return = (capital - initial_capital) / initial_capital * 100
-    wr     = len(wins) / n * 100 if n else 0
-    pf     = abs(sum(t["pnl"] for t in wins) / sum(t["pnl"] for t in losses)) \
-             if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
+    wr   = len(wins) / n * 100 if n else 0
+    pf   = abs(sum(t["pnl"] for t in wins) / sum(t["pnl"] for t in losses)) \
+           if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
     avg_win  = sum(t["pnl"] for t in wins)  / len(wins)  * 100 if wins   else 0
     avg_loss = sum(t["pnl"] for t in losses)/ len(losses)* 100 if losses else 0
-    eq_arr   = np.array(equity_curve)
-    peaks    = np.maximum.accumulate(eq_arr)
-    mdd      = float(np.max((peaks - eq_arr) / (peaks + 1e-9)) * 100)
-    flips    = [t for t in trade_log if t.get("reason") == "reverse_flip"]
+    eq_arr = np.array(equity_curve)
+    peaks  = np.maximum.accumulate(eq_arr)
+    mdd    = float(np.max((peaks - eq_arr) / (peaks + 1e-9)) * 100)
+    flips  = [t for t in trade_log if t.get("reason") == "reverse_flip"]
 
     return {
         "capital": capital, "trade_log": trade_log,
