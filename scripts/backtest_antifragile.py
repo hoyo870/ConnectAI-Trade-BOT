@@ -26,16 +26,8 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 from hybrid_engine import compute_metrics
-from config.af_params import TRADING_FEE, SLIPPAGE, FEE_TOTAL, PRESETS, get_preset
-
-
-def load_ohlcv_csv(path):
-    df = pd.read_csv(path, parse_dates=["timestamp"], index_col="timestamp")
-    df.columns = [c.lower() for c in df.columns]
-    for col in ["open", "high", "low", "close", "volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.sort_index()
+from config.af_params import TRADING_FEE, SLIPPAGE, FEE_TOTAL, PRESETS, get_preset, DEFAULT_PARAMS
+from config.loader import load_coin_raw, load_ohlcv_csv, _normalize_index, COIN_CONFIG
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,29 +65,27 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def run_antifragile(
     df,
     initial_capital = 10_000.0,
-    # AdaptRSI 진입 임계값 — 실거래 prod 파라미터와 동일하게 유지
-    dt_rsi_lo = 28,   # 하락추세: 롱 진입
-    dt_rsi_hi = 60,   # 하락추세: 숏 진입
-    rg_rsi_lo = 25,   # 횡보:     롱 진입
-    rg_rsi_hi = 75,   # 횡보:     숏 진입
-    ut_rsi_lo = 42,   # 상승추세: 롱 진입
-    ut_rsi_hi = 75,   # 상승추세: 숏 진입
-    require_bb      = False,  # BB 밴드 이탈 추가 조건 (False가 더 좋음)
-    # 레버리지 — .env LEVERAGE=7과 동일
+    require_bb      = False,
     leverage        = 7,
-    # 포지션 사이징 — live_trader AF_PARAMS와 동일
-    rr_base         = 0.20,   # 초기 자본 위험 비율
-    rr_add          = 0.10,   # 피라미딩 추가 비율
-    add_levels      = 3,      # 최대 추가 횟수
-    atr_add_step    = 0.5,    # 유리방향 X×ATR마다 추가
-    # Trailing Stop — prod 스윕 최적값
-    trail_atr_init  = 1.8,    # 초기 trailing stop 거리 (ATR 배수)
-    trail_atr_tight = 2.0,    # 피라미딩 후 tight trailing (ATR 배수)
-    # 기타
-    max_hold_bars   = 288,    # 최대 보유 (1일 = 288봉)
+    max_hold_bars   = 288,
     cooling_bars    = 100,
-    max_dd_cb       = 0.99,  # 실거래엔 이 제약 없음 → 사실상 비활성화
+    max_dd_cb       = 0.99,
+    **kwargs,
 ):
+    # DEFAULT_PARAMS 기준으로 caller kwargs 오버라이드 (파라미터 스테일 방지)
+    p               = {**DEFAULT_PARAMS, **kwargs}
+    dt_rsi_lo       = p["dt_rsi_lo"]
+    dt_rsi_hi       = p["dt_rsi_hi"]
+    rg_rsi_lo       = p["rg_rsi_lo"]
+    rg_rsi_hi       = p["rg_rsi_hi"]
+    ut_rsi_lo       = p["ut_rsi_lo"]
+    ut_rsi_hi       = p["ut_rsi_hi"]
+    rr_base         = p["rr_base"]
+    rr_add          = p["rr_add"]
+    add_levels      = p["add_levels"]
+    atr_add_step    = p["atr_add_step"]
+    trail_atr_init  = p["trail_atr_init"]
+    trail_atr_tight = p["trail_atr_tight"]
     df = df.reset_index(drop=True)
     df.dropna(subset=["_rsi", "_atr"], inplace=True)
     df = df.reset_index(drop=True)
@@ -282,71 +272,11 @@ def print_result(label, result, days):
 # 데이터 로드
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _normalize_index(df):
-    df = df.copy()
-    df.index = df.index.tz_convert(None) if df.index.tz else df.index
-    return df
-
-
-# 코인별 설정 (데이터 경로, 역사 시작일)
-COIN_CONFIG = {
-    "btc": {"label": "BTC", "hist_start": "2020-01-01"},
-    "eth": {"label": "ETH", "hist_start": "2021-04-01"},
-    "sol": {"label": "SOL", "hist_start": "2021-06-01"},
-    "xrp": {"label": "XRP", "hist_start": "2020-06-01"},
-}
-
-
 def load_coin_full(coin: str) -> pd.DataFrame:
-    """코인별 전체 OHLCV 로드 (BTC/ETH: 전용 경로, SOL/XRP: data/raw/ 자동 탐색)"""
-    coin = coin.lower()
-    label = coin.upper()
-    print(f"{label} 데이터 로드 중...")
-
-    if coin == "btc":
-        pieces = []
-        # data/raw/ 의 모든 BTCUSDT CSV 자동 탐색 (날짜순)
-        for f in sorted((ROOT / "data/raw").glob("BTCUSDT_5m_*.csv")):
-            try:
-                pieces.append(_normalize_index(load_ohlcv_csv(f)))
-            except Exception:
-                pass
-        if not pieces:
-            # parquet fallback
-            par = pd.read_parquet(ROOT / "data/signals_2026/backtest_2026_signals.parquet")
-            pieces.append(_normalize_index(par[["open","high","low","close","volume"]].copy()))
-
-    elif coin == "eth":
-        pieces = [
-            _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_history.parquet")),
-            _normalize_index(pd.read_parquet(ROOT / "data/eth/ETHUSDT_5m_2026.parquet")),
-        ]
-        # data/raw/ 의 추가 ETH CSV (최신화 파일)
-        for f in sorted((ROOT / "data/raw").glob("ETHUSDT_5m_*.csv")):
-            try:
-                pieces.append(_normalize_index(load_ohlcv_csv(f)))
-            except Exception:
-                pass
-
-    else:
-        # SOL, XRP — data/raw/ 에서 패턴 탐색
-        sym = f"{label}USDT"
-        candidates = sorted((ROOT / "data/raw").glob(f"{sym}_5m_*.csv"))
-        if not candidates:
-            raise FileNotFoundError(
-                f"{sym} 데이터 없음. 먼저 다운로드:\n"
-                f"  python src/data_fetcher.py --symbol {coin.upper()}/USDT --start 2021-01-01"
-            )
-        pieces = [_normalize_index(load_ohlcv_csv(f)) for f in candidates]
-
-    all_df = pd.concat(pieces).sort_index()
-    all_df = all_df[~all_df.index.duplicated(keep="last")]
-    all_df = all_df[all_df["close"].notna() & (all_df["close"] > 0)]
-    print(f"  {all_df.index[0].date()} ~ {all_df.index[-1].date()}  ({len(all_df):,}행)")
-    return add_indicators(all_df)
+    """코인별 전체 OHLCV + 구형 EMA 지표 로드 (data/loader.py 위임, 하위 호환)."""
+    return add_indicators(load_coin_raw(coin))
 
 
-# 이전 함수 이름 유지 (하위 호환)
 def load_btc_full(): return load_coin_full("btc")
 def load_eth_full(): return load_coin_full("eth")
 
@@ -412,7 +342,7 @@ def main():
     parser.add_argument("--window-days",type=int,   default=91)
     parser.add_argument("--require-bb", action="store_true")
     parser.add_argument("--trail-init", type=float, default=1.8)
-    parser.add_argument("--trail-tight",type=float, default=2.0)
+    parser.add_argument("--trail-tight",type=float, default=None)  # None → DEFAULT_PARAMS 사용
     parser.add_argument("--add-step",   type=float, default=0.5)
     args = parser.parse_args()
 
@@ -423,15 +353,16 @@ def main():
     coins = coin_map.get(args.coin, [args.coin])
 
     cfg = dict(
-        require_bb      = args.require_bb,
-        trail_atr_init  = args.trail_init,
-        trail_atr_tight = args.trail_tight,
-        atr_add_step    = args.add_step,
+        require_bb     = args.require_bb,
+        trail_atr_init = args.trail_init,
+        atr_add_step   = args.add_step,
     )
+    if args.trail_tight is not None:
+        cfg["trail_atr_tight"] = args.trail_tight
     if args.preset:
         cfg.update(get_preset(args.preset))
 
-    preset_label = f"preset={args.preset}" if args.preset else f"trail_init={cfg['trail_atr_init']}  trail_tight={cfg['trail_atr_tight']}"
+    preset_label = f"preset={args.preset}" if args.preset else f"trail_init={cfg['trail_atr_init']}  trail_tight={cfg.get('trail_atr_tight', 'default')}"
 
     for coin in coins:
         label = coin.upper()
