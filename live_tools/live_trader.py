@@ -164,11 +164,7 @@ AF_PARAMS = {
 # 거래소 emergency SL: trail_sl 대신 넓은 SL 등록 → intrabar 조기 체결 방지
 EMERGENCY_SL_ATR = 6.0
 
-# [US-002/004] 아래 상수는 문서 참조용 — 실제 동작은 AntifragileStrategy 클래스 기본값 사용
-# 변경 시 strategies/antifragile.py의 CONSECUTIVE_REVERSE_BARS 등을 수정할 것
-CONSECUTIVE_REVERSE_BARS = 1   # strategies/antifragile.py 동기화 (2→1, 2026-06-19)
-CONSECUTIVE_LOSS_LIMIT   = 2   # strategies/antifragile.py 동기화 (3→2, 2026-06-19)
-DIRECTION_COOLING_BARS   = 10  # strategies/antifragile.py 동기화 (20→10, 2026-06-19)
+# flip/cooling 상수는 strategies/antifragile.py에서 관리
 
 # 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) — config/af_params.py 중앙 관리
 # 실거래 전용 bb_sigma=0.5를 각 프리셋에 추가

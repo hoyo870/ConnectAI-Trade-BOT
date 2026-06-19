@@ -15,13 +15,13 @@ EMERGENCY_SL_ATR = 6.0  # intrabar wick SL 조기 체결 방지용 넓은 SL 배
 # ── 기본 파라미터 (prod 프리셋 = 실거래 기본값) ─────────────────────────────
 DEFAULT_PARAMS = {
     "dt_rsi_lo":       28,    # 하락추세: 롱 진입 RSI 임계값
-    "dt_rsi_hi":       58,    # 하락추세: 숏 진입 RSI 임계값  ← 60→58 (스윕 최적화 2026-06-19)
+    "dt_rsi_hi":       58,    # 하락추세: 숏 진입 RSI 임계값
     "rg_rsi_lo":       25,    # 횡보:     롱 진입 RSI 임계값
     "rg_rsi_hi":       75,    # 횡보:     숏 진입 RSI 임계값
-    "ut_rsi_lo":       44,    # 상승추세: 롱 진입 RSI 임계값  ← 42→44 (스윕 최적화 2026-06-19)
+    "ut_rsi_lo":       44,    # 상승추세: 롱 진입 RSI 임계값
     "ut_rsi_hi":       75,    # 상승추세: 숏 진입 RSI 임계값
     "trail_atr_init":  1.8,   # 초기 trailing stop 거리 (ATR 배수)
-    "trail_atr_tight": 2.5,   # 피라미딩 후 tight trailing  ← 2.0→2.5 (스윕 최적화 2026-06-19)
+    "trail_atr_tight": 2.5,   # 피라미딩 후 tight trailing (ATR 배수)
     "rr_base":         0.20,  # 초기 자본 위험 비율
     "rr_add":          0.10,  # 피라미딩 1회당 추가 비율
     "add_levels":      3,     # 최대 피라미딩 횟수

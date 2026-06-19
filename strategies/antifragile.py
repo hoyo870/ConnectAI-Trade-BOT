@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.af_params import DEFAULT_PARAMS, FEE_TOTAL as _DEFAULT_FEE
+from config.af_params import DEFAULT_PARAMS, FEE_TOTAL
 
 # ── 행동 상수 기본값 (Phase A-C 스윕으로 최적화, 2026-06-19) ─────────────────────
 CONSECUTIVE_REVERSE_BARS = 1   # [US-002] 반대 신호 발화 즉시 청산 (2→1)
@@ -39,7 +39,7 @@ class AntifragileStrategy:
         self.loss_limit = self.p.get("loss_limit",   CONSECUTIVE_LOSS_LIMIT)
         self.cool_bars  = self.p.get("cooling_bars", DIRECTION_COOLING_BARS)
         # 쿨링 판정용 수수료 (fee 포함 pnl이 양수인지 체크, 기본값: FEE_TOTAL)
-        self.fee        = self.p.get("fee_total", _DEFAULT_FEE)
+        self.fee        = self.p.get("fee_total", FEE_TOTAL)
         self.reset()
 
     # ── 상태 초기화 ────────────────────────────────────────────────────────────
