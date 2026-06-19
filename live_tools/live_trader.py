@@ -409,6 +409,9 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     strategy.load_state(state)
     tick_result = strategy.process_tick(price, atr, rsi, trend_up, trend_down)
 
+    # 실제 pnl_usdt 기반 쿨링 트리거로 차단된 방향 (동일봉 진입 방지용)
+    _newly_blocked: set[int] = set()
+
     for event in tick_result["events"]:
 
         # ── 청산 이벤트 ────────────────────────────────────────────────────────
@@ -439,9 +442,11 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 else:               strategy.csl_short = 0
             if strategy.csl_long  >= strategy.loss_limit:
                 strategy.cl_long  = strategy.cool_bars; strategy.csl_long  = 0
+                _newly_blocked.add(1)  # 동일봉 롱 진입 차단
                 log.warning(f"[{coin}/AF 방향쿨링] 롱 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
             if strategy.csl_short >= strategy.loss_limit:
                 strategy.cl_short = strategy.cool_bars; strategy.csl_short = 0
+                _newly_blocked.add(-1)  # 동일봉 숏 진입 차단
                 log.warning(f"[{coin}/AF 방향쿨링] 숏 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
 
         # ── 절반 익절 이벤트 ────────────────────────────────────────────────────
@@ -515,6 +520,12 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         # ── 진입 이벤트 ─────────────────────────────────────────────────────────
         elif event["type"] == "entry":
             direction = event["direction"]
+            # 실제 pnl_usdt 기반 쿨링이 이 봉에서 새로 트리거된 경우 진입 차단
+            if direction in _newly_blocked:
+                log.info(f"[{coin}/AF 진입 스킵] 실PnL 기반 쿨링 트리거 방향 차단 (동일봉)")
+                strategy.pos = 0; strategy.avg_entry = 0.0; strategy.rr = p["rr_base"]
+                strategy.add_cnt = 0; strategy.trail_sl = 0.0; strategy.partial = False
+                continue
             dir_str   = "LONG 🟢" if direction == 1 else "SHORT 🔴"
             if prev_trend != trend_str and (long_ok_now or short_ok_now):
                 log.info(f"[{coin}/AF 진입] 트렌드 {prev_trend}→{trend_str} 전환 후 안정화 봉 완료")
