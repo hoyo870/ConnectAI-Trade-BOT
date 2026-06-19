@@ -43,6 +43,7 @@ from exchange_client import (
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
 from strategies.antifragile import AntifragileStrategy
+from strategies.indicators import compute_scalar_indicators
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 ROOT        = Path(__file__).parent.parent
@@ -323,44 +324,13 @@ def get_tier(sig: float, tiers: list) -> tuple[float, float]:
 
 # ── Antifragile: 원시 지표 계산 ────────────────────────────────────────────────
 def _compute_af_indicators(df: pd.DataFrame) -> tuple:
-    """df의 raw OHLCV에서 ATR, RSI, 1h 추세 방향 계산 (마지막 봉 기준)"""
-    close = df["close"]; high = df["high"]; low = df["low"]
-
-    # ATR 14
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr = float(tr.ewm(span=14, adjust=False).mean().iloc[-1])
-
-    # RSI 14
-    delta = close.diff()
-    ag = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-    al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-    rsi = float((100 - 100 / (1 + ag / (al + 1e-9))).iloc[-1])
-
-    # 1h EMA20 + BB 횡보 구역 추세 판별 (마지막 1h 봉 기준)
-    # bb_sigma > 0: price > BB upper → trendup, price < BB lower → trenddown, 사이 → ranging
-    # bb_sigma = 0: 기존 EMA 기준 (price > EMA → up, price < EMA → down)
+    """df의 raw OHLCV에서 ATR, RSI, 1h 추세 방향 계산 (마지막 봉 기준)."""
+    bb_sigma = AF_PARAMS.get("bb_sigma", 0.5)
     try:
-        cl1h   = close.resample("1h").last().ffill()
-        ema_1h = cl1h.ewm(span=20, adjust=False).mean()
-        bb_sigma = AF_PARAMS.get("bb_sigma", 0.0)
-        if bb_sigma > 0:
-            std_1h = cl1h.rolling(20).std()
-            bb_up  = (ema_1h + bb_sigma * std_1h).iloc[-1]
-            bb_lo  = (ema_1h - bb_sigma * std_1h).iloc[-1]
-            last   = float(cl1h.iloc[-1])
-            trend_up   = bool(last > bb_up)
-            trend_down = bool(last < bb_lo)
-        else:
-            trend_up   = bool(cl1h.iloc[-1] > ema_1h.iloc[-1])
-            trend_down = bool(cl1h.iloc[-1] < ema_1h.iloc[-1])
+        return compute_scalar_indicators(df, bb_sigma)
     except Exception:
-        trend_up = trend_down = False
-
-    return atr, rsi, trend_up, trend_down
+        # 데이터 이상 시 안전 폴백: ATR=0 → ATR 필터로 진입 차단, RSI=50 → 중립
+        return 0.0, 50.0, False, False
 
 
 # ── Antifragile: 한 틱 처리 ────────────────────────────────────────────────────

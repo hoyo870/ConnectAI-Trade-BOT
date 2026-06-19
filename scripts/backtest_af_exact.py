@@ -33,44 +33,14 @@ from strategies.antifragile import (
     AntifragileStrategy,
     CONSECUTIVE_REVERSE_BARS, CONSECUTIVE_LOSS_LIMIT, DIRECTION_COOLING_BARS,
 )
+from strategies.indicators import add_indicators_af
+from config.loader import load_coin_raw
 
 BB_SIGMA = 0.5   # 1h BB 횡보 구역 폭
 
-
-# ── 지표 계산 (live_trader _compute_af_indicators 완벽 모방) ──────────────────
+# 하위 호환 alias — af_exact_sweep.py 등이 직접 import하는 이름 유지
 def add_indicators_exact(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    live_trader의 _compute_af_indicators와 동일하게 각 봉의 지표를 계산.
-    BB σ=0.5 기반 트렌드 (live_trader와 완전 일치).
-    """
-    df = df.copy()
-    close = df["close"]; high = df["high"]; low = df["low"]
-
-    # ATR 14 (EWM span=14)
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    df["_atr"] = tr.ewm(span=14, adjust=False).mean()
-
-    # RSI 14 (EWM com=13)
-    delta = close.diff()
-    ag = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-    al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-    df["_rsi"] = 100 - 100 / (1 + ag / (al + 1e-9))
-
-    # 1h BB σ=0.5 트렌드 (live_trader와 동일)
-    cl1h   = close.resample("1h").last().ffill()
-    ema_1h = cl1h.ewm(span=20, adjust=False).mean()
-    std_1h = cl1h.rolling(20).std()
-    bb_up  = ema_1h + BB_SIGMA * std_1h
-    bb_lo  = ema_1h - BB_SIGMA * std_1h
-
-    df["_trend_up"]   = (cl1h > bb_up).reindex(df.index, method="ffill").fillna(False).astype(int)
-    df["_trend_down"] = (cl1h < bb_lo).reindex(df.index, method="ffill").fillna(False).astype(int)
-
-    return df
+    return add_indicators_af(df, BB_SIGMA)
 
 
 # ── 핵심 백테스트 엔진 (AntifragileStrategy 사용) ─────────────────────────────
@@ -203,11 +173,9 @@ def print_result(label: str, res: dict, days: float):
     return p
 
 
-# ── 데이터 로드 (backtest_antifragile.py의 load_coin_full 재사용) ──────────────
+# ── 데이터 로드 ───────────────────────────────────────────────────────────────
 def load_coin(coin: str, start: str = None, end: str = None) -> pd.DataFrame:
-    from scripts.backtest_antifragile import load_coin_full
-    df = load_coin_full(coin)
-    df = add_indicators_exact(df)
+    df = add_indicators_af(load_coin_raw(coin), BB_SIGMA)
     if start: df = df[df.index >= start]
     if end:   df = df[df.index <  end]
     return df.copy()
