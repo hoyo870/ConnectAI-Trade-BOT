@@ -36,6 +36,17 @@ def add_indicators_af(df: pd.DataFrame, bb_sigma: float = 0.5) -> pd.DataFrame:
     return df
 
 
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """RSI + ATR + 2σ BB + bb_sigma=0 트렌드. 기존 backtest_antifragile 호환 단일 소스."""
+    df = add_indicators_af(df, bb_sigma=0)
+    close = df["close"]
+    mid = close.rolling(20).mean()
+    std = close.rolling(20).std()
+    df["_bb_upper"] = mid + 2 * std
+    df["_bb_lower"] = mid - 2 * std
+    return df
+
+
 def compute_scalar_indicators(df: pd.DataFrame, bb_sigma: float = 0.5) -> tuple:
     """마지막 봉 기준 (atr, rsi, trend_up, trend_down) 스칼라 반환."""
     out = add_indicators_af(df, bb_sigma)

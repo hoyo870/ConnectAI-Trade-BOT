@@ -32,14 +32,17 @@ class AntifragileStrategy:
     - get_state() → live_trader state JSON 호환 dict
     """
 
-    def __init__(self, params: dict | None = None):
+    def __init__(self, params: dict | None = None, ml_filter=None):
         self.p          = {**DEFAULT_PARAMS, **(params or {})}
+        self.ml_filter  = ml_filter
+        self._df_context = None  # update_context()로 설정
         self.lev        = self.p.get("leverage", 7)
-        self.flip_bars  = self.p.get("flip_bars",    CONSECUTIVE_REVERSE_BARS)
-        self.loss_limit = self.p.get("loss_limit",   CONSECUTIVE_LOSS_LIMIT)
-        self.cool_bars  = self.p.get("cooling_bars", DIRECTION_COOLING_BARS)
-        # 쿨링 판정용 수수료 (fee 포함 pnl이 양수인지 체크, 기본값: FEE_TOTAL)
-        self.fee        = self.p.get("fee_total", FEE_TOTAL)
+        self.flip_bars            = self.p.get("flip_bars",            CONSECUTIVE_REVERSE_BARS)
+        self.loss_limit           = self.p.get("loss_limit",           CONSECUTIVE_LOSS_LIMIT)
+        self.cool_bars            = self.p.get("cooling_bars",         DIRECTION_COOLING_BARS)
+        self.require_trend_stable = self.p.get("require_trend_stable", False)
+        self.partial_enabled      = self.p.get("partial_enabled",      False)
+        self.fee                  = self.p.get("fee_total",            FEE_TOTAL)
         self.reset()
 
     # ── 상태 초기화 ────────────────────────────────────────────────────────────
@@ -61,6 +64,7 @@ class AntifragileStrategy:
         self.csl_short  = 0   # 숏 연속 손실 카운터
         self.prev_trend = "RG"
         self._bar_idx   = 0
+        self._df_idx    = 0   # ML 컨텍스트 df 내 현재 봉 인덱스
 
     # ── state JSON 직렬화 / 복원 ────────────────────────────────────────────────
 
@@ -106,6 +110,17 @@ class AntifragileStrategy:
         self.prev_trend = state.get("last_trend", "RG")
         # current_bar는 이미 +1된 상태이므로 -1로 보정해야 process_tick에서 +1 후 일치
         self._bar_idx   = int(state.get("current_bar", self._bar_idx)) - 1
+
+    # ── ML 필터 컨텍스트 ───────────────────────────────────────────────────────
+
+    def update_context(self, df, idx: int | None = None):
+        """ML 컨텍스트 df 제공. idx=None이면 마지막 봉(실거래), 정수면 해당 봉(백테스트).
+
+        live_trader : update_context(df)          → len(df)-1 사용
+        backtest    : update_context(df, idx)     → idx 봉 사용
+        """
+        self._df_context = df
+        self._df_idx = idx if idx is not None else len(df) - 1
 
     # ── 핵심: 한 봉 처리 ──────────────────────────────────────────────────────
 
@@ -192,8 +207,8 @@ class AntifragileStrategy:
                     self.peak_px  = min(self.peak_px, price)
                     self.trail_sl = min(self.trail_sl, self.peak_px + trail_mult * eff_atr)
 
-                # 절반 익절
-                if not self.partial:
+                # 절반 익절 (partial_enabled=True일 때만 실행)
+                if self.partial_enabled and not self.partial:
                     p_ok = (self.pos == 1 and rsi >= rsi_hi) or (self.pos == -1 and rsi <= rsi_lo)
                     if p_ok:
                         partial_rr      = self.rr * 0.5
@@ -229,7 +244,7 @@ class AntifragileStrategy:
             if self.cl_long  > 0: self.cl_long  -= 1
             if self.cl_short > 0: self.cl_short -= 1
 
-            trend_stable = (self.prev_trend == trend)
+            trend_stable = (not self.require_trend_stable) or (self.prev_trend == trend)
             long_ok  = long_ok_now  and trend_stable and self.cl_long  == 0
             short_ok = short_ok_now and trend_stable and self.cl_short == 0
 
@@ -237,6 +252,15 @@ class AntifragileStrategy:
 
             if direction != 0 and atr < price * 0.0015:
                 direction = 0
+
+            if direction != 0 and self.ml_filter is not None and self._df_context is not None:
+                from models.af_ensemble.feature_extractor import extract_snapshot, extract_sequence
+                rsi_lo, rsi_hi = self._get_thresholds(trend)
+                loss_streak = self.csl_long if direction == 1 else self.csl_short
+                snap = extract_snapshot(self._df_context, self._df_idx, direction, rsi_lo, rsi_hi, loss_streak)
+                seq  = extract_sequence(self._df_context, self._df_idx)
+                if not self.ml_filter.should_enter(snap, seq):
+                    direction = 0
 
             if direction != 0:
                 self.pos        = direction

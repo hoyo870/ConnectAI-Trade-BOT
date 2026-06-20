@@ -15,6 +15,9 @@ STRATEGY 옵션 (.env):
 """
 from __future__ import annotations
 import sys, os, json, time, logging, csv, copy, fcntl
+# LightGBM(OpenMP) + PyTorch OpenMP 라이브러리 충돌(행/세그폴트) 방지 — import torch 이전에 설정해야 함
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -44,6 +47,10 @@ from telegram_notifier import send_trade_alert, poll_commands, get_credentials
 from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
 from strategies.antifragile import AntifragileStrategy
 from strategies.indicators import compute_scalar_indicators
+from models.af_ensemble.ensemble import AFEnsemble
+from models.af_ensemble.feature_extractor import add_ml_features
+from strategies.indicators import add_indicators
+from strategies.indicators import add_indicators_af
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 ROOT        = Path(__file__).parent.parent
@@ -157,7 +164,6 @@ DEFAULT_STATE = {
 # 기본 파라미터: config/af_params.py DEFAULT_PARAMS 기반 + 실거래 전용 필드 추가
 AF_PARAMS = {
     **DEFAULT_PARAMS,
-    "bb_sigma":      0.5,   # 횡보 구역 BB 폭 (0=EMA 기준, 0.5=BB 0.5σ 권장)
     "leverage":      int(os.getenv("LEVERAGE", "5")),  # .env LEVERAGE 우선
     "max_hold_bars": 288,   # 최대 보유봉수 (1일)
 }
@@ -168,9 +174,8 @@ EMERGENCY_SL_ATR = 6.0
 # flip/cooling 상수는 strategies/antifragile.py에서 관리
 
 # 파라미터 프리셋 (.env AF_PARAM_PRESET으로 선택) — config/af_params.py 중앙 관리
-# 실거래 전용 bb_sigma=0.5를 각 프리셋에 추가
 _AF_PRESETS: dict[str, dict] = {
-    name: {**get_preset(name), "bb_sigma": 0.5}
+    name: get_preset(name)
     for name in _PRESET_DEFS
     if name != "prod"  # prod = AF_PARAMS 기본값
 }
@@ -325,7 +330,7 @@ def get_tier(sig: float, tiers: list) -> tuple[float, float]:
 # ── Antifragile: 원시 지표 계산 ────────────────────────────────────────────────
 def _compute_af_indicators(df: pd.DataFrame) -> tuple:
     """df의 raw OHLCV에서 ATR, RSI, 1h 추세 방향 계산 (마지막 봉 기준)."""
-    bb_sigma = AF_PARAMS.get("bb_sigma", 0.5)
+    bb_sigma = AF_PARAMS.get("bb_sigma", 0)
     try:
         return compute_scalar_indicators(df, bb_sigma)
     except Exception:
@@ -336,7 +341,8 @@ def _compute_af_indicators(df: pd.DataFrame) -> tuple:
 # ── Antifragile: 한 틱 처리 ────────────────────────────────────────────────────
 def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     now_str: str, paper_mode: bool,
-                    paper_trade_csv: Optional[Path]) -> dict:
+                    paper_trade_csv: Optional[Path],
+                    ensemble=None) -> dict:
     """Antifragile Trailing Stop 전략: AdaptRSI 진입 + ATR trailing stop + 피라미딩"""
     coin = os.environ.get("COIN", "BTC").upper()
     TRADING_FEE = 0.0005 + 0.0002
@@ -371,7 +377,13 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                                     (price + p["trail_atr_init"] * atr)
 
     # ── AntifragileStrategy로 신호 처리 ──────────────────────────────────────────
-    strategy = AntifragileStrategy(p)
+    strategy = AntifragileStrategy(p, ml_filter=ensemble)
+    if ensemble is not None:
+        try:
+            # ML 컨텍스트: bb_sigma=0.5 트렌드(실거래 기준) + 2σ BB(ML 피처용) 혼합
+            strategy.update_context(add_ml_features(add_indicators(df)))
+        except Exception as _ml_e:
+            log.warning(f"[{coin}/ML 피처] 계산 실패 → ML 필터 이번 틱 비활성: {_ml_e}")
     strategy.load_state(state)
     tick_result = strategy.process_tick(price, atr, rsi, trend_up, trend_down)
 
@@ -603,7 +615,8 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
 def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                       paper_trade_csv: Optional[Path],
                       total_tracked_snapshot: float | None = None,
-                      prefetched_df=None) -> dict:
+                      prefetched_df=None,
+                      ensemble=None) -> dict:
     """4종목 멀티코인 모드 — 코인별 OHLCV fetch → 중복 방지 → process_tick_af 호출."""
     os.environ["COIN"] = coin
 
@@ -780,7 +793,7 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
         state["daily_halt"] = True
         return state
 
-    return process_tick_af(exchange, df, state, price, now_str, paper_mode, paper_trade_csv)
+    return process_tick_af(exchange, df, state, price, now_str, paper_mode, paper_trade_csv, ensemble=ensemble)
 
 
 # ── 메인 루프 한 틱 처리 (DL v17 단일코인용) ──────────────────────────────────
@@ -1295,7 +1308,18 @@ def main():
         models = None
         scaler = None
         log.info("[AF] DL 모델 로드 스킵 (Antifragile 전략 rule-based)")
+        ml_ensemble = None
+        if os.getenv("ML_FILTER_ENABLED", "false").lower() in ("1", "true", "yes"):
+            ml_model_dir = ROOT / os.getenv("ML_MODEL_DIR", "models/af_ensemble/saved")
+            try:
+                ml_ensemble = AFEnsemble.load(str(ml_model_dir))
+                log.info(f"[ML 필터] 앙상블 로드 완료: {ml_model_dir}  theta={ml_ensemble.threshold:.3f}")
+            except Exception as _me:
+                log.warning(f"[ML 필터] 로드 실패 → 필터 비활성화: {_me}")
+        else:
+            log.info("[ML 필터] 비활성 (ML_FILTER_ENABLED 미설정 또는 false)")
     else:
+        ml_ensemble = None
         params = load_params()
         models, scaler = load_models(device)
 
@@ -1317,6 +1341,9 @@ def main():
     log.info(f"  전략:     {strategy}")
     log.info(f"  모드:     {trade_mode.upper()}")
     log.info(f"  디바이스: {device}")
+    if multi_mode:
+        ml_status = f"활성 (theta={ml_ensemble.threshold:.3f})" if ml_ensemble else "비활성"
+        log.info(f"  ML 필터:  {ml_status}")
     log.info("=" * 60)
 
     # ══════════════════════════════════════════════════════════════
@@ -1533,6 +1560,7 @@ def main():
                             all_paths[c]["paper_trade_csv"],
                             total_tracked_snapshot,
                             prefetched_df=prefetched.get(c),
+                            ensemble=ml_ensemble,
                         )
                         atomic_write_json(all_paths[c]["state_file"], all_states[c])
                     except Exception as e:

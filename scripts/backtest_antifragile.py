@@ -28,34 +28,7 @@ import pandas as pd
 from hybrid_engine import compute_metrics
 from config.af_params import TRADING_FEE, SLIPPAGE, FEE_TOTAL, PRESETS, get_preset, DEFAULT_PARAMS
 from config.loader import load_coin_raw, load_ohlcv_csv, _normalize_index, COIN_CONFIG
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 지표 계산
-# ─────────────────────────────────────────────────────────────────────────────
-
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    close = df["close"]; high = df["high"]; low = df["low"]
-
-    delta = close.diff()
-    ag = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-    al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-    df["_rsi"] = 100 - 100 / (1 + ag / (al + 1e-9))
-
-    mid = close.rolling(20).mean(); std = close.rolling(20).std()
-    df["_bb_upper"] = mid + 2 * std
-    df["_bb_lower"] = mid - 2 * std
-
-    tr = pd.concat([high - low, (high-close.shift()).abs(), (low-close.shift()).abs()], axis=1).max(axis=1)
-    df["_atr"] = tr.ewm(span=14, adjust=False).mean()
-
-    cl1h   = close.resample("1h").last().ffill()
-    ema_1h = cl1h.ewm(span=20, adjust=False).mean()
-    df["_trend_up"]   = (cl1h > ema_1h).reindex(df.index, method="ffill").fillna(False).astype(int)
-    df["_trend_down"] = (cl1h < ema_1h).reindex(df.index, method="ffill").fillna(False).astype(int)
-
-    return df
+from strategies.indicators import add_indicators  # 단일 소스 (strategies/indicators.py)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,9 +314,10 @@ def main():
     parser.add_argument("--seed",       type=int,   default=42)
     parser.add_argument("--window-days",type=int,   default=91)
     parser.add_argument("--require-bb", action="store_true")
-    parser.add_argument("--trail-init", type=float, default=1.8)
+    parser.add_argument("--trail-init", type=float, default=DEFAULT_PARAMS["trail_atr_init"])
     parser.add_argument("--trail-tight",type=float, default=None)  # None → DEFAULT_PARAMS 사용
     parser.add_argument("--add-step",   type=float, default=0.5)
+    parser.add_argument("--leverage",   type=int,   default=5)
     args = parser.parse_args()
 
     coin_map = {
@@ -356,6 +330,7 @@ def main():
         require_bb     = args.require_bb,
         trail_atr_init = args.trail_init,
         atr_add_step   = args.add_step,
+        leverage       = args.leverage,
     )
     if args.trail_tight is not None:
         cfg["trail_atr_tight"] = args.trail_tight

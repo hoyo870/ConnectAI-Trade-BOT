@@ -14,18 +14,29 @@ EMERGENCY_SL_ATR = 6.0  # intrabar wick SL 조기 체결 방지용 넓은 SL 배
 
 # ── 기본 파라미터 (prod 프리셋 = 실거래 기본값) ─────────────────────────────
 DEFAULT_PARAMS = {
-    "dt_rsi_lo":       28,    # 하락추세: 롱 진입 RSI 임계값
-    "dt_rsi_hi":       58,    # 하락추세: 숏 진입 RSI 임계값
-    "rg_rsi_lo":       25,    # 횡보:     롱 진입 RSI 임계값
-    "rg_rsi_hi":       75,    # 횡보:     숏 진입 RSI 임계값
-    "ut_rsi_lo":       44,    # 상승추세: 롱 진입 RSI 임계값
-    "ut_rsi_hi":       75,    # 상승추세: 숏 진입 RSI 임계값
-    "trail_atr_init":  1.8,   # 초기 trailing stop 거리 (ATR 배수)
-    "trail_atr_tight": 2.5,   # 피라미딩 후 tight trailing (ATR 배수)
-    "rr_base":         0.20,  # 초기 자본 위험 비율
-    "rr_add":          0.10,  # 피라미딩 1회당 추가 비율
+    # ── RSI 진입 임계값 (STRATEGY_ANTIFRAGILE.md 2026-06-10 기준) ────────────
+    "dt_rsi_lo":       22,    # 하락추세: 롱 진입 RSI 임계값
+    "dt_rsi_hi":       65,    # 하락추세: 숏 진입 RSI 임계값
+    "rg_rsi_lo":       30,    # 횡보:     롱 진입 RSI 임계값
+    "rg_rsi_hi":       70,    # 횡보:     숏 진입 RSI 임계값
+    "ut_rsi_lo":       40,    # 상승추세: 롱 진입 RSI 임계값 (35→40, 2026-06-10)
+    "ut_rsi_hi":       85,    # 상승추세: 숏 진입 RSI 임계값 (78→85, 2026-06-10)
+    # ── 청산: ATR Trailing Stop ───────────────────────────────────────────────
+    "trail_atr_init":  1.0,   # 초기 trailing stop 거리 (0.5→1.0, 2026-06-09)
+    "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (0.8→1.5, 2026-06-09)
+    # ── 포지션 사이징 ─────────────────────────────────────────────────────────
+    "rr_base":         0.10,  # 초기 자본 위험 비율
+    "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
     "add_levels":      3,     # 최대 피라미딩 횟수
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
+    # ── ML 필터 ───────────────────────────────────────────────────────────────
+    "ml_threshold":    None,  # float 0-1 if ML active, None = disabled
+    # ── 행동 제어 (backtest_af_ml.py 기준 — 비활성화 기본값) ─────────────────
+    "flip_bars":             9999,  # 반대 신호 즉시 청산 비활성 (9999=사실상 off)
+    "loss_limit":            9999,  # 방향 쿨링 비활성
+    "cooling_bars":          0,     # 쿨링 봉수 0
+    "require_trend_stable":  False, # 트렌드 안정화 대기 없음
+    "partial_enabled":       False, # 절반 익절 없음
 }
 
 # ── 프리셋 (backtest + live_trader 공통) ─────────────────────────────────────

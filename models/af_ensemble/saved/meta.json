@@ -1,0 +1,9 @@
+{
+  "threshold": 0.3,
+  "lgbm_weight": 0.5,
+  "lstm_weight": 0.5,
+  "input_size": 7,
+  "hidden": 64,
+  "num_layers": 2,
+  "dropout": 0.2
+}

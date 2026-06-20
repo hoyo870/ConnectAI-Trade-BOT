@@ -215,14 +215,124 @@ logs/paper_state_xrp.json      ← XRP 상태 · paper_trades_xrp.csv
 ### 백테스트 재실행
 
 ```bash
-# 4종목 전체 2026 검증
-python scripts/backtest_antifragile.py --coin all --mode 2026
+# 실거래 완벽 모방 백테스트 (ML 필터 포함, 권장)
+python scripts/batch_backtest.py --model models/af_ensemble/saved/
 
-# 역사적 랜덤 검증 (4종목)
-python scripts/backtest_antifragile.py --coin all --mode random --seed 42
+# 단일 코인 / 단일 기간
+python scripts/backtest_af_exact.py --mode 2026 --coin all --model models/af_ensemble/saved/
+python scripts/backtest_af_exact.py --mode hist  --coin all --model models/af_ensemble/saved/
 
-# Trail 파라미터 비교 검증
-python temp/scripts/38_trail_param_test.py
+# ML 없이 순수 Antifragile
+python scripts/backtest_af_exact.py --mode 2026 --coin all
+```
+
+---
+
+## ML 앙상블 진입 필터 (2026-06-20)
+
+### 매매 흐름
+
+```
+5분봉 완성
+    │
+    ▼
+[1단계] AdaptRSI 임계값 체크
+    1h EMA20 방향 → 하락/횡보/상승 트렌드 분류
+    RSI ≤ lo (롱) 또는 RSI ≥ hi (숏)
+    │
+    ▼
+[2단계] ATR 필터
+    ATR < 가격 × 0.15% → 횡보 차단 (스킵)
+    │
+    ▼
+[3단계] ML 앙상블 필터 ← 신규
+    ├── 스냅샷 24피처 ──▶ LightGBM ──▶ P_lgbm
+    └── 직전 20봉 × 7피처 ──▶ LSTM ──▶ P_lstm
+                  P = 0.5 × P_lgbm + 0.5 × P_lstm
+                  P ≥ 0.300 → 진입  |  P < 0.300 → 스킵
+    │
+    ▼
+[4단계] 진입 실행
+    시장가 주문 | 레버리지 설정 | Emergency SL 등록 (6×ATR)
+    │
+    ▼
+[5단계] ATR Trailing Stop 추적 (ML 관여 없음)
+    피라미딩 (유리방향 0.5×ATR마다) | 최대 보유 288봉
+```
+
+### ML 필터 입력 피처
+
+#### LightGBM — 스냅샷 24피처 (진입 시점 단면)
+
+| 카테고리 | 피처 |
+|---------|------|
+| RSI 컨텍스트 | rsi_value, rsi_dist (임계값까지 거리) |
+| 변동성 | atr_pct (ATR/가격), atr_percentile (최근 100봉 백분위) |
+| 추세 강도 | ema20_slope, macd_hist, adx |
+| 밴드 | bb_width, bb_pos (Bollinger Band 내 위치) |
+| 거래량 | vol_ratio (vs MA20), obv_slope |
+| 가격 위치 | close_vs_ema9/21/50/100 (4개) |
+| 시간 | hour_sin, hour_cos, day_of_week |
+| 방향/레짐 | direction (롱=1/숏=-1), trend_regime (-1/0/1) |
+| 최근 캔들 | ret1, ret3, body_ratio |
+| 손실 맥락 | loss_streak (연속 손실 횟수) |
+
+#### LSTM — 직전 20봉 × 7피처 (시계열)
+
+```
+[close_pct_change, rsi/100, atr_pct, vol_ratio, ema20_slope, macd_hist, bb_pos]
+입력 shape: (batch, 20, 7)
+```
+
+### 모델 사양
+
+| 항목 | LightGBM | LSTM |
+|------|---------|------|
+| 구조 | n_estimators=500, max_depth=6 | 2-layer(64) → FC(32) → Sigmoid |
+| 훈련 | 2020~2024 (4코인 풀링) | 동일 |
+| 검증 | 2025 (theta 보정) | val AUC 0.5395 |
+| val AUC | 0.6542 | — |
+| **theta** | — | **0.300 (앙상블 기준)** |
+
+훈련 라벨: `PnL > 0.1%` = 양성 (수수료 0.111%/side 포함)
+
+### 검증 결과 (2026-06-20 기준)
+
+#### 2026 OOS (2026-01-01 ~ 2026-05-31), LEV×5
+
+| 코인 | 거래수 | WR | TPD | 총수익 | MDD | PF |
+|------|------:|---:|----:|------:|----:|---:|
+| BTC  | 486 | 29.6% | 3.22 | **+361.0%** | 4.2% | 6.098 |
+| ETH  | 680 | 34.0% | 4.50 | **+1634.5%** | 7.7% | 5.557 |
+| SOL  | 789 | 31.7% | 5.23 | **+5608.0%** | 5.5% | 7.030 |
+| XRP  | 646 | 30.2% | 4.28 | **+1197.2%** | 12.3% | 6.171 |
+
+#### hist 검증 (random 10×91일, seed=42), LEV×5
+
+| 코인 | 거래수(평균) | WR | TPD | 총수익(평균) | MDD | PF | **통과** |
+|------|----------:|---:|----:|----------:|----:|---:|--------:|
+| BTC | 360 | 34.6% | 3.96 | +928.3% | 11.6% | 5.883 | **10/10** |
+| ETH | 479 | 33.3% | 5.26 | +2193.1% | 10.7% | 5.909 | **10/10** |
+| SOL | 549 | 36.0% | 6.04 | +47130.9% | 8.3% | 6.623 | **10/10** |
+| XRP | 463 | 35.2% | 5.09 | +987519.1% | 12.2% | 6.294 | **10/10** |
+
+> SOL/XRP hist는 고레버리지 복리 폭발 구간 포함. PF·WR·10/10 통과가 실질 지표.
+
+### 활성화
+
+```env
+# .env
+ML_FILTER_ENABLED=true
+ML_MODEL_DIR=models/af_ensemble/saved
+LEVERAGE=10
+```
+
+```bash
+# 백테스트 재실행
+python scripts/batch_backtest.py --model models/af_ensemble/saved/ --coin all
+
+# 단일 기간
+python scripts/batch_backtest.py --model models/af_ensemble/saved/ --coin btc --mode 2026
 ```
 
 ---

@@ -19,7 +19,9 @@ Usage:
   python scripts/backtest_af_exact.py --mode 2026 --coin all
 """
 
-import sys, argparse, random
+import os, sys, argparse, random
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -35,12 +37,23 @@ from strategies.antifragile import (
 )
 from strategies.indicators import add_indicators_af
 from config.loader import load_coin_raw
+from models.af_ensemble.feature_extractor import add_ml_features
+from strategies.indicators import add_indicators
 
-BB_SIGMA = 0.5   # 1h BB 횡보 구역 폭
+BB_SIGMA = 0   # backtest_af_ml.py 기준 (EMA 단순 크로스)
 
 # 하위 호환 alias — af_exact_sweep.py 등이 직접 import하는 이름 유지
 def add_indicators_exact(df: pd.DataFrame) -> pd.DataFrame:
     return add_indicators_af(df, BB_SIGMA)
+
+
+def build_ml_context_df(raw: pd.DataFrame) -> pd.DataFrame:
+    """ML 필터용 enriched df: bb_sigma=0.5 트렌드 + 2σ BB + 전체 ML 피처."""
+    df_base = add_indicators(raw)               # _bb_upper/_bb_lower (2σ) + _rsi/_atr
+    df_af   = add_indicators_af(raw, BB_SIGMA)  # bb_sigma=0.5 트렌드
+    df_base["_trend_up"]   = df_af["_trend_up"].values
+    df_base["_trend_down"] = df_af["_trend_down"].values
+    return add_ml_features(df_base)
 
 
 # ── 핵심 백테스트 엔진 (AntifragileStrategy 사용) ─────────────────────────────
@@ -48,11 +61,15 @@ def run_af_exact(
     df: pd.DataFrame,
     initial_capital: float = 270.76,
     p: dict = None,
+    ensemble=None,
+    df_ml: pd.DataFrame = None,
 ) -> dict:
     """
     AntifragileStrategy 클래스를 사용하는 백테스트 엔진.
     live_trader.py와 동일한 신호 로직을 strategies/antifragile.py에서 공유.
     p: DEFAULT_PARAMS 기반 dict
+    ensemble: AFEnsemble | None — ML 진입 필터 (None이면 비활성)
+    df_ml: ML 컨텍스트 df (build_ml_context_df() 결과, ensemble 사용 시 필수)
     """
     if p is None:
         p = dict(DEFAULT_PARAMS)
@@ -61,8 +78,13 @@ def run_af_exact(
     df.dropna(subset=["_rsi", "_atr"], inplace=True)
     df = df.reset_index(drop=True)
 
+    # df_ml도 같은 필터/리셋 적용 (인덱스 정렬)
+    if df_ml is not None:
+        df_ml = df_ml.reset_index(drop=True)
+        df_ml = df_ml[~df_ml[["_rsi", "_atr"]].isna().any(axis=1)].reset_index(drop=True)
+
     lev      = p.get("leverage", 7)
-    strategy = AntifragileStrategy(p)
+    strategy = AntifragileStrategy(p, ml_filter=ensemble)
 
     capital      = initial_capital
     peak_cap     = initial_capital
@@ -76,6 +98,9 @@ def run_af_exact(
         rsi       = float(row["_rsi"])
         trend_up  = bool(row["_trend_up"])
         trend_dn  = bool(row["_trend_down"])
+
+        if ensemble is not None and df_ml is not None and idx < len(df_ml):
+            strategy.update_context(df_ml, idx)
 
         result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn)
 
@@ -183,7 +208,8 @@ def load_coin(coin: str, start: str = None, end: str = None) -> pd.DataFrame:
 
 # ── 랜덤 hist 검증 ─────────────────────────────────────────────────────────────
 def run_hist_validation(coin: str, all_df: pd.DataFrame, seed: int, windows: int,
-                        window_days: int, hist_start: str):
+                        window_days: int, hist_start: str,
+                        ensemble=None, df_ml_all: pd.DataFrame = None):
     rng      = random.Random(seed)
     possible = all_df[(all_df.index >= hist_start) &
                       (all_df.index <= all_df.index[-1] - pd.Timedelta(days=window_days))].index
@@ -199,7 +225,9 @@ def run_hist_validation(coin: str, all_df: pd.DataFrame, seed: int, windows: int
         ed  = sd + pd.Timedelta(days=window_days)
         seg = all_df[(all_df.index >= sd) & (all_df.index < ed)].copy()
         if len(seg) < 500: continue
-        res = run_af_exact(seg, **{"p": p_def})
+        seg_ml = df_ml_all[(df_ml_all.index >= sd) & (df_ml_all.index < ed)].copy() \
+                 if df_ml_all is not None else None
+        res = run_af_exact(seg, p=p_def, ensemble=ensemble, df_ml=seg_ml)
         m   = res["metrics"]
         tpd = m["n_trades"] / window_days
         if len(res["trade_log"]) > 5:
@@ -235,7 +263,15 @@ def main():
     parser.add_argument("--windows", type=int, default=10)
     parser.add_argument("--seed",    type=int, default=42)
     parser.add_argument("--window-days", type=int, default=91)
+    parser.add_argument("--model",   default=None,
+                        help="AFEnsemble 저장 디렉터리 (지정 시 ML 진입 필터 활성)")
     args = parser.parse_args()
+
+    ensemble = None
+    if args.model:
+        from models.af_ensemble.ensemble import AFEnsemble
+        ensemble = AFEnsemble.load(args.model)
+        print(f"[ML 필터] 로드 완료: {args.model}  theta={ensemble.threshold:.3f}")
 
     coins = ["btc","eth","sol","xrp"] if args.coin == "all" else [args.coin]
 
@@ -243,22 +279,32 @@ def main():
         label = coin.upper()
         print(f"\n{'█'*66}")
         print(f"  {label}/USDT — live_trader 완벽 모방 백테스트")
-        print(f"  BB σ={BB_SIGMA}  flip={CONSECUTIVE_REVERSE_BARS}봉  쿨링={CONSECUTIVE_LOSS_LIMIT}연속/{DIRECTION_COOLING_BARS}봉")
+        ml_tag = f"  ML 필터: 활성 (theta={ensemble.threshold:.3f})" if ensemble else ""
+        print(f"  BB σ={BB_SIGMA}  flip={CONSECUTIVE_REVERSE_BARS}봉  쿨링={CONSECUTIVE_LOSS_LIMIT}연속/{DIRECTION_COOLING_BARS}봉{ml_tag}")
         print(f"{'█'*66}")
 
         p_def = dict(DEFAULT_PARAMS)
 
+        # raw 전체 로드 → ML 컨텍스트 df 사전 계산 (ensemble 사용 시)
+        raw_all = load_coin_raw(coin)
+        all_df  = add_indicators_af(raw_all, BB_SIGMA)
+        df_ml_all = build_ml_context_df(raw_all) if ensemble else None
+
+        def _slice(df, start, end):
+            s = df[df.index >= start] if start else df
+            return s[s.index < end].copy() if end else s.copy()
+
         if args.mode in ("2026", "compare"):
             print(f"\n[{label}] 2026 OOS (2026-01-01 ~ 2026-05-31)")
-            df26 = load_coin(coin, "2026-01-01", "2026-06-01")
+            df26    = _slice(all_df, "2026-01-01", "2026-06-01")
+            df26_ml = _slice(df_ml_all, "2026-01-01", "2026-06-01") if df_ml_all is not None else None
             days = (df26.index[-1] - df26.index[0]).days
-            res  = run_af_exact(df26, p=p_def)
+            res  = run_af_exact(df26, p=p_def, ensemble=ensemble, df_ml=df26_ml)
             print_result(f"{label} 2026 OOS", res, days)
 
             if args.mode == "compare":
                 # 기존 BT와 나란히 비교
-                from scripts.backtest_antifragile import run_antifragile, add_indicators
-                from scripts.backtest_antifragile import load_coin_full
+                from scripts.backtest_antifragile import run_antifragile, load_coin_full
                 df26_old = load_coin_full(coin)
                 df26_old = df26_old[(df26_old.index >= "2026-01-01") & (df26_old.index < "2026-06-01")].copy()
                 res_old = run_antifragile(df26_old, **p_def)
@@ -277,20 +323,19 @@ def main():
 
         if args.mode in ("hist", "compare"):
             hs = HIST_START.get(coin, "2020-01-01")
-            from scripts.backtest_antifragile import load_coin_full
-            all_df = load_coin_full(coin)
-            all_df = add_indicators_exact(all_df)
             print(f"\n[{label}] 랜덤 히스토리 검증")
             run_hist_validation(coin, all_df, args.seed, args.windows,
-                                args.window_days, hs)
+                                args.window_days, hs,
+                                ensemble=ensemble, df_ml_all=df_ml_all)
 
         if args.mode == "jun1819":
             print(f"\n[{label}] Jun 18~19 실거래 기간 (2026-06-18 03:37 ~ 2026-06-19 12:00 UTC)")
-            df_jun = load_coin(coin, "2026-06-18 03:37", "2026-06-19 12:00")
+            df_jun    = _slice(all_df, "2026-06-18 03:37", "2026-06-19 12:00")
+            df_jun_ml = _slice(df_ml_all, "2026-06-18 03:37", "2026-06-19 12:00") if df_ml_all is not None else None
             if len(df_jun) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df_jun)}봉)"); continue
             days = (df_jun.index[-1] - df_jun.index[0]).total_seconds() / 86400
-            res  = run_af_exact(df_jun, p=p_def)
+            res  = run_af_exact(df_jun, p=p_def, ensemble=ensemble, df_ml=df_jun_ml)
             print_result(f"{label} Jun18~19", res, days)
             print(f"\n  상세 거래:")
             for t in res["trade_log"]:
