@@ -27,6 +27,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
+# 한글 폰트 설정 (macOS: AppleGothic, 없으면 경고만 억제)
+import warnings
+_KO_FONTS = ["AppleGothic", "Apple SD Gothic Neo", "NanumGothic", "Malgun Gothic"]
+_found_font = next(
+    (f for f in _KO_FONTS
+     if any(f.lower() in p.name.lower()
+            for p in matplotlib.font_manager.fontManager.ttflist)),
+    None,
+)
+if _found_font:
+    plt.rcParams["font.family"] = _found_font
+    plt.rcParams["axes.unicode_minus"] = False
+else:
+    warnings.filterwarnings("ignore", category=UserWarning, message="Glyph.*missing from font")
+
 from config.loader import load_coin_raw
 from strategies.indicators import add_indicators_af
 from strategies.backtest_engine import AntifragileBacktestRunner
@@ -61,7 +76,7 @@ HIST_START = {
 CHART_DIR = ROOT / "temp" / "charts"
 
 
-def _save_jun_charts(label: str, mode: str, df: pd.DataFrame,
+def _save_charts(label: str, mode: str, df: pd.DataFrame,
                      res: dict, initial_capital: float = 10_000.0) -> None:
     """jun* 모드 전용: 종가 + 바이홀드 + 전략 수익 3개 서브플롯을 하나의 이미지로 저장."""
     CHART_DIR.mkdir(parents=True, exist_ok=True)
@@ -199,6 +214,7 @@ def main():
             print(f"\n[{label}] 2026 OOS: {df.index[0].date()} ~ {df.index[-1].date()}  ({days}일)")
             res = runner.run(df, df_ml)
             runner.print_result(f"{label} 2026 OOS", res, days)
+            _save_charts(label, "2026", df, res)
 
         elif args.mode == "hist":
             hs = HIST_START.get(coin, "2020-01-01")
@@ -219,7 +235,7 @@ def main():
                 dr   = "롱" if t["direction"] == 1 else "숏"
                 flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
                 print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_jun_charts(label, "jun1819", df, res)
+            _save_charts(label, "jun1819", df, res)
 
         elif args.mode == "jun2022":
             df, df_ml = runner.load_coin(coin, start="2026-06-20 18:30", end="2026-06-22 13:30")
@@ -234,7 +250,7 @@ def main():
                 dr   = "롱" if t["direction"] == 1 else "숏"
                 flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
                 print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_jun_charts(label, "jun2022", df, res)
+            _save_charts(label, "jun2022", df, res)
 
         elif args.mode == "jun":
             df, df_ml = runner.load_coin(coin, start="2026-06-01 00:00", end="2026-06-22 17:00")
@@ -249,7 +265,7 @@ def main():
                 dr   = "롱" if t["direction"] == 1 else "숏"
                 flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
                 print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_jun_charts(label, "jun", df, res)
+            _save_charts(label, "jun", df, res)
 
 
 if __name__ == "__main__":
