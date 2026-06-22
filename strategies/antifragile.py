@@ -151,17 +151,15 @@ class AntifragileStrategy:
                     self.peak_px  = min(self.peak_px, price)
                     self.trail_sl = min(self.trail_sl, self.peak_px + trail_mult * eff_atr)
 
-                # 피라미딩 (RSI 극단 구간 차단)
-                favorable  = self.pos * (price - self.avg_entry) / (self.entry_atr + 1e-9)
+                # 피라미딩 — run_antifragile_ml 동일 방식 (RSI 극단 구간 차단 없음)
+                favorable  = self.pos * (price - self.avg_entry) / (atr + 1e-9)
                 next_lvl   = (self.add_cnt + 1) * self.p["atr_add_step"]
-                rsi_ok_pyr = (self.pos == 1 and rsi < rsi_hi) or (self.pos == -1 and rsi > rsi_lo)
-                if self.add_cnt < self.p["add_levels"] and favorable >= next_lvl and rsi_ok_pyr:
-                    old_qty    = self.rr / self.p["rr_base"]
-                    add_rr     = self.p["rr_add"]
-                    new_qty    = old_qty + add_rr / self.p["rr_base"]
-                    self.avg_entry = (self.avg_entry * old_qty + price * (add_rr / self.p["rr_base"])) / new_qty
-                    self.rr       += add_rr
-                    self.add_cnt  += 1
+                if self.add_cnt < self.p["add_levels"] and favorable >= next_lvl:
+                    add_rr        = self.p["rr_add"]
+                    self.rr      += add_rr
+                    self.add_cnt += 1
+                    # avg_entry는 최초 진입가 고정 (구형 run_antifragile_ml 동일 방식)
+                    # avg_entry 가중평균 업데이트 시 동일 exit에서 손실로 잘못 분류되는 문제 방지
                     tight = self.p["trail_atr_tight"]
                     if self.pos == 1: self.trail_sl = max(self.trail_sl, price - tight * atr)
                     else:             self.trail_sl = min(self.trail_sl, price + tight * atr)

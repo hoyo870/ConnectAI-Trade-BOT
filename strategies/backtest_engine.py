@@ -78,9 +78,9 @@ class AntifragileBacktestRunner:
     # ── 핵심 백테스트 루프 ────────────────────────────────────────────────────────
 
     def run(self, df: pd.DataFrame, df_ml: pd.DataFrame,
-            initial_capital: float = 270.76) -> dict:
+            initial_capital: float = 10_000.0) -> dict:
         """
-        백테스트 실행.
+        백테스트 실행 (기본 초기자본 $10,000).
         df:    load_coin()에서 반환된 첫 번째 요소
         df_ml: load_coin()에서 반환된 두 번째 요소
         """
@@ -114,7 +114,9 @@ class AntifragileBacktestRunner:
 
             for event in result["events"]:
                 if event["type"] == "close":
-                    pnl = max(event["pnl_raw"] * lev * event["rr"], -event["rr"]) - FEE_TOTAL
+                    # 구형 run_antifragile_ml 동일 수수료 모델:
+                    # 수수료를 pnl_raw에서 먼저 차감 → 레버리지×rr로 증폭 (왕복 2×FEE_TOTAL)
+                    pnl = max((event["pnl_raw"] - 2 * FEE_TOTAL) * lev * event["rr"], -event["rr"])
                     capital  *= (1 + pnl)
                     peak_cap  = max(peak_cap, capital)
                     trade_log.append({
@@ -138,7 +140,7 @@ class AntifragileBacktestRunner:
         if strategy.pos != 0 and len(df) > 0:
             price = float(df.iloc[-1]["close"])
             raw   = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
-            pnl   = max(raw * lev * strategy.rr, -strategy.rr) - FEE_TOTAL
+            pnl   = max((raw - 2 * FEE_TOTAL) * lev * strategy.rr, -strategy.rr)
             capital *= (1 + pnl)
             trade_log.append({"pnl": pnl, "direction": strategy.pos, "reason": "end",
                                "capital": round(capital, 2)})
@@ -160,6 +162,7 @@ class AntifragileBacktestRunner:
         return {
             "capital": capital,
             "trade_log": trade_log,
+            "equity_curve": equity_curve,
             "metrics": {
                 "total_return": total_return, "n_trades": n, "win_rate": wr,
                 "profit_factor": pf, "avg_win": avg_win, "avg_loss": avg_loss,
