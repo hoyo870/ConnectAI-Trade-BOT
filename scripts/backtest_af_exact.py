@@ -77,8 +77,12 @@ CHART_DIR = ROOT / "temp" / "charts"
 
 
 def _save_charts(label: str, mode: str, df: pd.DataFrame,
-                     res: dict, initial_capital: float = 10_000.0) -> None:
-    """jun* 모드 전용: 종가 + 바이홀드 + 전략 수익 3개 서브플롯을 하나의 이미지로 저장."""
+                 res: dict, initial_capital: float = 10_000.0) -> None:
+    """서브플롯 구성:
+      1) 종가 + 롱 진입/청산 마커
+      2) 종가 + 숏 진입/청산 마커
+      3) 전략 수익 vs 바이홀드
+    """
     CHART_DIR.mkdir(parents=True, exist_ok=True)
 
     trade_log    = res["trade_log"]
@@ -86,9 +90,7 @@ def _save_charts(label: str, mode: str, df: pd.DataFrame,
     closes       = df["close"].values
     timestamps   = df.index
 
-    # ── 바이홀드 / 전략 equity ────────────────────────────────────────────────
-    bh_equity = initial_capital * closes / closes[0]
-    bh_ret    = (bh_equity / initial_capital - 1) * 100
+    bh_ret    = (closes / closes[0] - 1) * 100
 
     eq = np.array(equity_curve)
     if len(eq) < len(timestamps):
@@ -97,50 +99,85 @@ def _save_charts(label: str, mode: str, df: pd.DataFrame,
         eq = eq[:len(timestamps)]
     strat_ret = (eq / initial_capital - 1) * 100
 
-    # ── 3행 1열 서브플롯 ─────────────────────────────────────────────────────
+    longs  = [t for t in trade_log if t.get("direction") ==  1
+              and t.get("entry") is not None and t.get("exit") is not None]
+    shorts = [t for t in trade_log if t.get("direction") == -1
+              and t.get("entry") is not None and t.get("exit") is not None]
+
     fig, axes = plt.subplots(3, 1, figsize=(14, 13),
-                             gridspec_kw={"hspace": 0.45})
-    date_fmt = mdates.DateFormatter("%m/%d")
+                             gridspec_kw={"hspace": 0.50})
+    date_fmt = mdates.DateFormatter("%m/%d %H:%M")
     date_loc = mdates.AutoDateLocator()
 
-    # ── 서브플롯 1: 종가 + 진입/청산 마커 ────────────────────────────────────
-    ax = axes[0]
-    ax.plot(timestamps, closes, color="#4a90d9", linewidth=0.8, label="Close")
-    for t in trade_log:
-        entry_px = t.get("entry")
-        exit_px  = t.get("exit")
-        if entry_px is None or exit_px is None:
-            continue
-        direction   = t["direction"]
-        color_entry = "#2ecc71" if direction == 1 else "#e74c3c"
-        color_exit  = "#e74c3c" if direction == 1 else "#2ecc71"
-        ei = int(np.argmin(np.abs(closes - entry_px)))
-        xi = int(np.argmin(np.abs(closes[ei:] - exit_px))) + ei
-        ax.scatter(timestamps[ei], entry_px, marker="^", color=color_entry, s=40, zorder=5)
-        ax.scatter(timestamps[xi], exit_px,  marker="v", color=color_exit,  s=40, zorder=5)
-    ax.xaxis.set_major_formatter(date_fmt)
-    ax.xaxis.set_major_locator(date_loc)
-    plt.setp(ax.get_xticklabels(), rotation=20)
-    ax.set_title(f"{label} 종가  ({timestamps[0].strftime('%m/%d')} ~ {timestamps[-1].strftime('%m/%d')})",
-                 fontsize=11)
-    ax.set_ylabel("Price (USDT)")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.3)
+    def _plot_trades(ax, trades, title_prefix, entry_color, exit_color, direction):
+        ax.plot(timestamps, closes, color="#4a90d9", linewidth=0.8, label="Close")
+        # 마커 크기(s=70) 기준 오프셋: 반지름 sqrt(70)/2 pt × 70% → 데이터 좌표 변환
+        ax.relim(); ax.autoscale_view()
+        ylo, yhi = ax.get_ylim()
+        ax_h_pts = ax.get_position().height * fig.get_figheight() * 72
+        offset   = (np.sqrt(70) / 2 * 1.50) * (yhi - ylo) / ax_h_pts
+        for t in trades:
+            entry_px = t["entry"]; exit_px = t["exit"]
+            # exit_ts / entry_ts 기반으로 정확한 봉 인덱스 결정
+            if t.get("exit_ts") is not None:
+                xi = int(timestamps.searchsorted(t["exit_ts"]))
+                xi = min(xi, len(closes) - 1)
+            else:
+                xi = int(np.argmin(np.abs(closes - exit_px)))
+            if t.get("entry_ts") is not None:
+                ei = int(timestamps.searchsorted(t["entry_ts"]))
+                ei = min(ei, xi)
+            else:
+                ei = int(np.argmin(np.abs(closes[:xi] - entry_px))) if xi > 0 else 0
+            pnl_val  = t.get("pnl", 0)
+            pnl_sign = "+" if pnl_val >= 0 else ""
+            pnl_pct  = f"{pnl_sign}{pnl_val*100:.2f}%"
+            pnl_color = "#27ae60" if pnl_val >= 0 else "#c0392b"
+            # 롱: 진입 ^ 아래, 청산 v 위  |  숏: 진입 v 위, 청산 ^ 아래
+            if direction == 1:
+                e_y = entry_px - offset; e_marker = "^"
+                x_y = exit_px  + offset; x_marker = "v"
+                ann_xytext = (4, 6)
+            else:
+                e_y = entry_px + offset; e_marker = "v"
+                x_y = exit_px  - offset; x_marker = "^"
+                ann_xytext = (4, -10)
+            ax.annotate("", xy=(timestamps[xi], exit_px),
+                        xytext=(timestamps[ei], entry_px),
+                        arrowprops=dict(arrowstyle="-|>", color=entry_color,
+                                        lw=1.2, alpha=0.5))
+            ax.scatter(timestamps[ei], e_y, marker=e_marker,
+                       color=entry_color, s=70, zorder=6, alpha=0.85)
+            ax.scatter(timestamps[xi], x_y, marker=x_marker,
+                       color=exit_color,  s=70, zorder=6, alpha=0.85)
+            ax.annotate(pnl_pct,
+                        xy=(timestamps[xi], x_y),
+                        xytext=ann_xytext, textcoords="offset points",
+                        fontsize=7, color=pnl_color, alpha=0.9,
+                        fontweight="bold")
+        n = len(trades)
+        wins = sum(1 for t in trades if t.get("pnl", 0) >= 0)
+        wr_str = f"  WR={wins}/{n}" if n else "  (없음)"
+        ax.set_title(
+            f"{label} {title_prefix}  "
+            f"({timestamps[0].strftime('%m/%d')} ~ {timestamps[-1].strftime('%m/%d')})"
+            f"{wr_str}",
+            fontsize=11,
+        )
+        ax.set_ylabel("Price (USDT)")
+        ax.xaxis.set_major_formatter(date_fmt)
+        ax.xaxis.set_major_locator(date_loc)
+        plt.setp(ax.get_xticklabels(), rotation=20)
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
 
-    # ── 서브플롯 2: 바이홀드 수익률 ──────────────────────────────────────────
-    ax = axes[1]
-    ax.plot(timestamps, bh_ret, color="#9b59b6", linewidth=1.2)
-    ax.axhline(0, color="gray", linewidth=0.6, linestyle="--")
-    ax.fill_between(timestamps, bh_ret, 0, where=(bh_ret >= 0), alpha=0.15, color="#2ecc71")
-    ax.fill_between(timestamps, bh_ret, 0, where=(bh_ret <  0), alpha=0.15, color="#e74c3c")
-    ax.xaxis.set_major_formatter(date_fmt)
-    ax.xaxis.set_major_locator(date_loc)
-    plt.setp(ax.get_xticklabels(), rotation=20)
-    ax.set_title(f"{label} 바이홀드  최종 {float(bh_ret[-1]):+.1f}%", fontsize=11)
-    ax.set_ylabel("수익률 (%)")
-    ax.grid(alpha=0.3)
+    # ── 서브플롯 1: 롱 포지션 ─────────────────────────────────────────────────
+    _plot_trades(axes[0], longs,  "롱 포지션", "#2ecc71", "#e74c3c", direction=1)
 
-    # ── 서브플롯 3: 전략 수익 곡선 ───────────────────────────────────────────
+    # ── 서브플롯 2: 숏 포지션 ─────────────────────────────────────────────────
+    _plot_trades(axes[1], shorts, "숏 포지션", "#e74c3c", "#2ecc71", direction=-1)
+
+    # ── 서브플롯 3: 전략 수익 vs 바이홀드 ────────────────────────────────────
     ax = axes[2]
     ax.plot(timestamps, strat_ret, color="#e67e22", linewidth=1.2, label="Strategy")
     ax.plot(timestamps, bh_ret,    color="#9b59b6", linewidth=0.8,

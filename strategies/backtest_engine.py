@@ -84,7 +84,8 @@ class AntifragileBacktestRunner:
         df:    load_coin()에서 반환된 첫 번째 요소
         df_ml: load_coin()에서 반환된 두 번째 요소
         """
-        df = df.reset_index(drop=True)
+        df = df.reset_index()          # datetime 인덱스 → '_ts' 컬럼으로 보존
+        df.rename(columns={"timestamp": "_ts", "index": "_ts"}, inplace=True)
         df.dropna(subset=["_rsi", "_atr"], inplace=True)
         df = df.reset_index(drop=True)
 
@@ -98,6 +99,7 @@ class AntifragileBacktestRunner:
         peak_cap     = initial_capital
         trade_log    = []
         equity_curve = [capital]
+        entry_ts     = None   # 현재 포지션 진입 타임스탬프 추적
 
         for idx in range(1, len(df)):
             row      = df.iloc[idx]
@@ -106,10 +108,12 @@ class AntifragileBacktestRunner:
             rsi      = float(row["_rsi"])
             trend_up = bool(row["_trend_up"])
             trend_dn = bool(row["_trend_down"])
+            cur_ts   = df.at[idx, "_ts"] if "_ts" in df.columns else None
 
             if idx < len(df_ml):
                 strategy.update_context(df_ml, idx)
 
+            prev_pos = strategy.pos
             result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn)
 
             for event in result["events"]:
@@ -126,7 +130,14 @@ class AntifragileBacktestRunner:
                         "capital":   round(capital, 2),
                         "entry":     round(event["entry_price"], 6),
                         "exit":      round(event["exit_price"],  6),
+                        "entry_ts":  entry_ts,
+                        "exit_ts":   cur_ts,
                     })
+                    entry_ts = None  # 청산 후 초기화
+
+            # 진입 감지: 신규 진입(prev_pos==0) 또는 flip 후 재진입(entry_ts가 None인데 포지션 있음)
+            if strategy.pos != 0 and entry_ts is None:
+                entry_ts = cur_ts
 
             if strategy.pos != 0:
                 unr = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
