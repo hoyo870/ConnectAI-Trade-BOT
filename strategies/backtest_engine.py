@@ -28,7 +28,7 @@ from models.af_ensemble.feature_extractor import add_ml_features
 from strategies.antifragile import AntifragileStrategy
 from strategies.indicators import add_indicators, add_indicators_af
 
-_BB_SIGMA = 0.5  # live_trader.py와 동일한 BB 트렌드 판별 기준
+_BB_SIGMA = 0  # live_trader.py와 동일: bb_sigma=0 (EMA 크로스, BB 미사용)
 
 
 class AntifragileBacktestRunner:
@@ -68,7 +68,7 @@ class AntifragileBacktestRunner:
 
     @staticmethod
     def _build_ml_context(raw: pd.DataFrame) -> pd.DataFrame:
-        """ML 필터용 enriched df: bb_sigma=0.5 트렌드 + 2σ BB + 전체 ML 피처."""
+        """ML 필터용 enriched df: bb_sigma=0 트렌드 + 2σ BB + 전체 ML 피처."""
         df_base = add_indicators(raw)
         df_af   = add_indicators_af(raw, _BB_SIGMA)
         df_base["_trend_up"]   = df_af["_trend_up"].values

@@ -28,7 +28,7 @@ from strategies.indicators import add_indicators_af
 from strategies.backtest_engine import AntifragileBacktestRunner
 
 _DEFAULT_MODEL = str(ROOT / "models/af_ensemble/saved")
-_BB_SIGMA = 0.5
+_BB_SIGMA = 0  # live_trader.py와 동일: bb_sigma=0 (EMA 크로스, BB 미사용)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
