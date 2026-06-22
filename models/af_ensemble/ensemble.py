@@ -36,7 +36,7 @@ class AFEnsemble:
                             theta_range=(0.30, 0.70, 0.05)):
         """
         theta 스윕 → pass_rate 유지 가능 범위에서 품질 점수 최대화.
-        실제 TPD 검증은 backtest_af_ml.py에서 수행.
+        실제 TPD 검증은 backtest_af_exact.py 또는 AntifragileBacktestRunner로 수행.
         """
         thetas = np.arange(*theta_range)
         p_lgbm = self.lgbm.predict_proba(X_snap_val)

@@ -89,8 +89,7 @@ def generate_labels_for_coin(
                 # 진입 시점의 RSI 임계값 재현 (process_tick이 이미 계산한 값과 동일)
                 trend_str = AntifragileStrategy._trend_str(trend_up, trend_dn)
                 rsi_lo_t, rsi_hi_t = strategy._get_thresholds(trend_str)
-                # loss_streak: 이미 close 이벤트에서 업데이트된 값 (진입 직전 상태)
-                loss_streak = strategy.csl_long if direction == 1 else strategy.csl_short
+                loss_streak = 0  # 방향 쿨링 제거 후 고정값
                 snap = extract_snapshot(df_ml, idx, direction, rsi_lo_t, rsi_hi_t, loss_streak)
                 seq  = extract_sequence(df_ml, idx, seq_len)
                 pending = {

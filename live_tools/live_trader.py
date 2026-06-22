@@ -149,14 +149,6 @@ DEFAULT_STATE = {
     "af_current_rr":     0.0,   # 현재 자본 위험 비율 (피라미딩으로 증가)
     "af_entry_atr":      0.0,   # 진입 시점 ATR (피라미딩 단계 계산용)
     "af_registered_sl":  0.0,   # 거래소에 등록된 SL 가격 (갱신 여부 판단용)
-    "af_partial_taken":  False, # RSI 극단구간 절반 익절 실행 여부 (청산 시 리셋)
-    # ── [US-002] 강한 반대 신호 조기청산 ────────────────────────────────
-    "af_consecutive_reverse": 0,  # 반대 방향 신호 연속 발화 카운터
-    # ── [US-004] 연속 손실 방향 쿨링 ────────────────────────────────────
-    "af_consec_long_loss":  0,  # 롱 방향 연속 손실 횟수
-    "af_consec_short_loss": 0,  # 숏 방향 연속 손실 횟수
-    "af_long_cooling_left": 0,  # 롱 진입 차단 잔여봉
-    "af_short_cooling_left": 0, # 숏 진입 차단 잔여봉
 }
 
 # ── Antifragile 전략 파라미터 ──────────────────────────────────────────────────
@@ -206,8 +198,6 @@ def _clear_entry_fields(state: dict) -> None:
         "entry_sig_long", "entry_sig_short",
         "af_trail_sl", "af_peak_price", "af_pyramid_count",
         "af_current_rr", "af_entry_atr", "af_registered_sl",
-        "af_partial_taken",
-        "af_consecutive_reverse",  # [US-002] 포지션 종료 시 flip 카운터 리셋
     ):
         state[key] = copy.deepcopy(DEFAULT_STATE.get(key, 0))
 
@@ -387,9 +377,6 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     strategy.load_state(state)
     tick_result = strategy.process_tick(price, atr, rsi, trend_up, trend_down)
 
-    # 실제 pnl_usdt 기반 쿨링 트리거로 차단된 방향 (동일봉 진입 방지용)
-    _newly_blocked: set[int] = set()
-
     for event in tick_result["events"]:
 
         # ── 청산 이벤트 ────────────────────────────────────────────────────────
@@ -410,61 +397,6 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 f"PnL: {pnl_pct:+.2f}% ({pnl_usdt:+.1f} USDT)\n"
                 f"자본: {cap_before:,.0f} → {cap_after:,.0f} USDT"
             )
-            # [US-004] 실제 pnl_usdt 기반으로 쿨링 카운터 재계산 (추정치 오버라이드)
-            strategy.consec_rev = 0
-            if pnl_usdt <= 0:
-                if closed_pos == 1: strategy.csl_long += 1;  strategy.csl_short = 0
-                else:               strategy.csl_short += 1; strategy.csl_long  = 0
-            else:
-                if closed_pos == 1: strategy.csl_long  = 0
-                else:               strategy.csl_short = 0
-            if strategy.csl_long  >= strategy.loss_limit:
-                strategy.cl_long  = strategy.cool_bars; strategy.csl_long  = 0
-                _newly_blocked.add(1)  # 동일봉 롱 진입 차단
-                log.warning(f"[{coin}/AF 방향쿨링] 롱 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
-            if strategy.csl_short >= strategy.loss_limit:
-                strategy.cl_short = strategy.cool_bars; strategy.csl_short = 0
-                _newly_blocked.add(-1)  # 동일봉 숏 진입 차단
-                log.warning(f"[{coin}/AF 방향쿨링] 숏 {strategy.cool_bars}봉 차단 (연속{strategy.loss_limit}손실)")
-
-        # ── 절반 익절 이벤트 ────────────────────────────────────────────────────
-        elif event["type"] == "partial":
-            _dec     = {"BTC": 3, "ETH": 2, "SOL": 1, "XRP": 0}.get(coin, 3)
-            half_qty = round(float(state.get("entry_qty", 0)) * 0.5, _dec)
-            min_q    = MIN_QTY()
-            if half_qty >= min_q and (float(state.get("entry_qty", 0)) - half_qty) >= min_q:
-                prr  = event["rr"]
-                ppnl = max(event["pnl_raw"] * lev * prr, -prr)
-                cap_b = state["capital"]
-                log.info(f"[{coin}/AF 절반익절] RSI={rsi:.1f} qty {state['entry_qty']} "
-                         f"→ {float(state['entry_qty']) - half_qty:.{_dec}f} PnL={ppnl:+.4f}")
-                success = True
-                if not paper_mode:
-                    try:
-                        place_market_order(exchange, "sell" if state["position"] == 1 else "buy",
-                                           half_qty, reduce_only=True)
-                    except Exception as _pe:
-                        log.error(f"[{coin}/AF 절반익절 실패] {_pe}")
-                        success = False
-                        strategy.rr      *= 2   # 클래스 내부 rr 롤백
-                        strategy.partial  = False
-                if success:
-                    state["capital"]        *= (1 + ppnl)
-                    state["entry_qty"]       -= half_qty
-                    state["entry_rr"]        *= 0.5
-                    state["af_current_rr"]    = state["entry_rr"]
-                    state["af_partial_taken"] = True
-                    send_trade_alert(
-                        f"✂️ <b>[{coin}/AF] 절반 익절</b>\n"
-                        f"RSI={rsi:.1f} | 가격={price:,.4f}\n"
-                        f"익절qty={half_qty} | PnL={ppnl:+.4f}\n"
-                        f"자본: {cap_b:,.0f} → {state['capital']:,.0f} USDT"
-                    )
-            else:
-                log.info(f"[{coin}/AF 절반익절 스킵] half_qty={half_qty} < min_qty={min_q}")
-                strategy.rr     *= 2   # 클래스 내부 rr 롤백
-                strategy.partial = False
-
         # ── 피라미딩 이벤트 ─────────────────────────────────────────────────────
         elif event["type"] == "pyramid":
             pyramid_snapshot = {k: state.get(k) for k in (
@@ -498,12 +430,6 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
         # ── 진입 이벤트 ─────────────────────────────────────────────────────────
         elif event["type"] == "entry":
             direction = event["direction"]
-            # 실제 pnl_usdt 기반 쿨링이 이 봉에서 새로 트리거된 경우 진입 차단
-            if direction in _newly_blocked:
-                log.info(f"[{coin}/AF 진입 스킵] 실PnL 기반 쿨링 트리거 방향 차단 (동일봉)")
-                strategy.pos = 0; strategy.avg_entry = 0.0; strategy.rr = p["rr_base"]
-                strategy.add_cnt = 0; strategy.trail_sl = 0.0; strategy.partial = False
-                continue
             dir_str   = "LONG 🟢" if direction == 1 else "SHORT 🔴"
             if prev_trend != trend_str and (long_ok_now or short_ok_now):
                 log.info(f"[{coin}/AF 진입] 트렌드 {prev_trend}→{trend_str} 전환 후 안정화 봉 완료")
@@ -584,28 +510,16 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                         _clear_entry_fields(state)
                         strategy.pos = 0; strategy.avg_entry = 0.0
 
-    # ── 쿨링 해제 로그 (진입 차단 해제 시만) ─────────────────────────────────────
-    if strategy.cl_long == 0 and state.get("af_long_cooling_left", 0) > 0:
-        log.info(f"[{coin}/AF 롱쿨링 해제]")
-    if strategy.cl_short == 0 and state.get("af_short_cooling_left", 0) > 0:
-        log.info(f"[{coin}/AF 숏쿨링 해제]")
-
     # ── state 동기화 (AntifragileStrategy → state dict) ──────────────────────
-    state["position"]               = strategy.pos
-    state["last_trend"]             = strategy.prev_trend
-    state["af_trail_sl"]            = strategy.trail_sl
-    state["af_peak_price"]          = strategy.peak_px
-    state["af_consecutive_reverse"] = strategy.consec_rev
-    state["af_consec_long_loss"]    = strategy.csl_long
-    state["af_consec_short_loss"]   = strategy.csl_short
-    state["af_long_cooling_left"]   = strategy.cl_long
-    state["af_short_cooling_left"]  = strategy.cl_short
+    state["position"]    = strategy.pos
+    state["last_trend"]  = strategy.prev_trend
+    state["af_trail_sl"] = strategy.trail_sl
+    state["af_peak_price"] = strategy.peak_px
     if strategy.pos != 0:
         state["af_current_rr"]    = strategy.rr
         state["entry_rr"]         = strategy.rr
         state["af_pyramid_count"] = strategy.add_cnt
         state["af_entry_atr"]     = strategy.entry_atr
-        state["af_partial_taken"] = strategy.partial
         state["avg_entry_price"]  = strategy.avg_entry
 
     return state
@@ -1308,16 +1222,13 @@ def main():
         models = None
         scaler = None
         log.info("[AF] DL 모델 로드 스킵 (Antifragile 전략 rule-based)")
-        ml_ensemble = None
-        if os.getenv("ML_FILTER_ENABLED", "false").lower() in ("1", "true", "yes"):
-            ml_model_dir = ROOT / os.getenv("ML_MODEL_DIR", "models/af_ensemble/saved")
-            try:
-                ml_ensemble = AFEnsemble.load(str(ml_model_dir))
-                log.info(f"[ML 필터] 앙상블 로드 완료: {ml_model_dir}  theta={ml_ensemble.threshold:.3f}")
-            except Exception as _me:
-                log.warning(f"[ML 필터] 로드 실패 → 필터 비활성화: {_me}")
-        else:
-            log.info("[ML 필터] 비활성 (ML_FILTER_ENABLED 미설정 또는 false)")
+        ml_model_dir = ROOT / os.getenv("ML_MODEL_DIR", "models/af_ensemble/saved")
+        try:
+            ml_ensemble = AFEnsemble.load(str(ml_model_dir))
+        except Exception as _ml_e:
+            log.error(f"[ML 필터] 로드 실패 — 실거래 중단: {ml_model_dir}  오류: {_ml_e}")
+            raise
+        log.info(f"[ML 필터] 앙상블 로드 완료: {ml_model_dir}  theta={ml_ensemble.threshold:.3f}")
     else:
         ml_ensemble = None
         params = load_params()
@@ -1342,8 +1253,7 @@ def main():
     log.info(f"  모드:     {trade_mode.upper()}")
     log.info(f"  디바이스: {device}")
     if multi_mode:
-        ml_status = f"활성 (theta={ml_ensemble.threshold:.3f})" if ml_ensemble else "비활성"
-        log.info(f"  ML 필터:  {ml_status}")
+        log.info(f"  ML 필터:  활성 (theta={ml_ensemble.threshold:.3f})")
     log.info("=" * 60)
 
     # ══════════════════════════════════════════════════════════════

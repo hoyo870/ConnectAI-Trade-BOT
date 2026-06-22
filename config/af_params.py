@@ -1,6 +1,6 @@
 """
 Antifragile 전략 공통 파라미터/프리셋 — 단일 소스
-backtest_antifragile.py + live_tools/live_trader.py 둘 다 이 파일을 import.
+strategies/backtest_engine.py + live_tools/live_trader.py 공유.
 프리셋 변경 시 이 파일만 수정하면 됨.
 """
 
@@ -31,12 +31,6 @@ DEFAULT_PARAMS = {
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
     # ── ML 필터 ───────────────────────────────────────────────────────────────
     "ml_threshold":    None,  # float 0-1 if ML active, None = disabled
-    # ── 행동 제어 (backtest_af_ml.py 기준 — 비활성화 기본값) ─────────────────
-    "flip_bars":             9999,  # 반대 신호 즉시 청산 비활성 (9999=사실상 off)
-    "loss_limit":            9999,  # 방향 쿨링 비활성
-    "cooling_bars":          0,     # 쿨링 봉수 0
-    "require_trend_stable":  False, # 트렌드 안정화 대기 없음
-    "partial_enabled":       False, # 절반 익절 없음
 }
 
 # ── 프리셋 (backtest + live_trader 공통) ─────────────────────────────────────

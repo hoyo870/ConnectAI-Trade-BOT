@@ -37,7 +37,7 @@ def add_indicators_af(df: pd.DataFrame, bb_sigma: float = 0.5) -> pd.DataFrame:
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """RSI + ATR + 2σ BB + bb_sigma=0 트렌드. 기존 backtest_antifragile 호환 단일 소스."""
+    """RSI + ATR + 2σ BB + bb_sigma=0 트렌드. ML 피처 계산 기반 df 생성용."""
     df = add_indicators_af(df, bb_sigma=0)
     close = df["close"]
     mid = close.rolling(20).mean()
