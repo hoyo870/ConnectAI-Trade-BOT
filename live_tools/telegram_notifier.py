@@ -215,11 +215,15 @@ def poll_commands(token: str, chat_id: str, offset: int = 0) -> tuple[list, int]
     new_offset = offset
     for update in data.get("result", []):
         new_offset = max(new_offset, update.get("update_id", 0) + 1)
-        msg = update.get("message") or update.get("edited_message") or {}
+        # message(개인/그룹), channel_post(채널), edited_message 모두 처리
+        msg = (update.get("message") or update.get("channel_post")
+               or update.get("edited_message") or {})
         if str(msg.get("chat", {}).get("id", "")) == str(chat_id):
             text = msg.get("text", "").strip()
             if text.startswith("/"):
-                commands.append(text.split()[0].lower())
+                # 채널에서는 /command@botname 형식 → @botname 제거
+                cmd = text.split()[0].lower().split("@")[0]
+                commands.append(cmd)
     return commands, new_offset
 
 
