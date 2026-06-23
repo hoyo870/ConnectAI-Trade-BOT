@@ -331,10 +331,12 @@ def api_status():
         coin: {
             "capital":     round(s.get("capital", 0), 2),
             "position":    s.get("position", 0),
-            "daily_halt":  s.get("daily_halt", False),
-            "entry_price": round(s.get("entry_price", 0), 4),
+            "entry_price": round(s.get("avg_entry_price") or s.get("entry_price", 0), 4),
+            "entry_rr":    round(s.get("entry_rr") or s.get("af_current_rr", 0.1), 3),
+            "entry_lev":   int(s.get("entry_lev", 0)),
             "trail_sl":    round(s.get("af_trail_sl", 0), 4),
             "last_price":  round(s.get("last_price", 0), 4),
+            "pyramid_cnt": int(s.get("af_pyramid_count", 0)),
         }
         for coin, s in states.items()
     }

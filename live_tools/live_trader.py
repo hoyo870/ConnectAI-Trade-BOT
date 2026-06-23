@@ -342,6 +342,12 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
             dir_str     = "LONG 🟢" if closed_pos == 1 else "SHORT 🔴"
             entry_logged = float(state.get("avg_entry_price") or state.get("entry_price") or price)
             cap_before  = state["capital"]
+            # _clear_entry_fields 호출 전 캡처 (청산 후 리셋됨)
+            hold_bars = state.get("current_bar", 0) - state.get("entry_bar", 0)
+            hold_min  = hold_bars * 5
+            hold_str  = f"{hold_min//60}h{hold_min%60:02d}m" if hold_min >= 60 else f"{hold_min}m"
+            pyr_cnt   = state.get("af_pyramid_count", 0)
+            pyr_str   = f" | pyr {pyr_cnt}/3" if pyr_cnt > 0 else ""
             _close_and_log(exchange, state, price, now_str, forced=False, reason=reason,
                            paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
             cap_after  = state["capital"]
@@ -351,7 +357,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                 f"📤 <b>{'[PAPER] ' if paper_mode else ''}[{coin}/AF] 청산</b> [{reason}] {dir_str}\n"
                 f"진입가: {entry_logged:,.4f} → 청산가: {price:,.4f}\n"
                 f"PnL: {pnl_pct:+.2f}% ({pnl_usdt:+.1f} USDT)\n"
-                f"자본: {cap_before:,.0f} → {cap_after:,.0f} USDT"
+                f"보유: {hold_str}{pyr_str} | 자본: {cap_before:,.0f} → {cap_after:,.0f} USDT"
             )
         # ── 피라미딩 이벤트 ─────────────────────────────────────────────────────
         elif event["type"] == "pyramid":
@@ -380,8 +386,19 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
                     strategy.rr        -= p["rr_add"]
                     log.error(f"[{coin}/AF] 피라미딩 주문 실패: {e}")
                 else:
-                    send_trade_alert(f"➕ <b>[{coin}/AF] 피라미딩 #{event['add_cnt']}</b>\n"
-                                     f"가격: {price:,.4f} | 추가수량: {add_qty}")
+                    entry_p  = float(state.get("avg_entry_price") or state.get("entry_price") or event.get("new_avg", 0))
+                    last_px  = float(state.get("last_price", 0))
+                    pnl_str  = ""
+                    if last_px > 0 and entry_p > 0:
+                        pos      = state.get("position", 0)
+                        pnl_raw  = pos * (last_px - entry_p) / (entry_p + 1e-9)
+                        pnl_lev  = pnl_raw * state.get("entry_lev", 1) * event["new_rr"]
+                        pnl_str  = f"\n미실현: {pnl_lev:+.2%} | 현재가: {last_px:,.4f}"
+                    send_trade_alert(
+                        f"➕ <b>[{coin}/AF] 피라미딩 #{event['add_cnt']}</b>\n"
+                        f"가격: {price:,.4f} | avg진입: {entry_p:,.4f}{pnl_str}\n"
+                        f"rr_total: {event['new_rr']:.2f} | 추가수량: {add_qty}"
+                    )
 
         # ── 진입 이벤트 ─────────────────────────────────────────────────────────
         elif event["type"] == "entry":
@@ -879,6 +896,85 @@ def sleep_until_next_candle(on_wait_tick=None, poll_interval: float = STOP_POLL_
         time.sleep(min(poll_interval, remain))
 
 
+def _build_pos_report(all_states: dict) -> str:
+    """현재 열린 포지션만 간략 표시."""
+    from datetime import timezone
+    kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
+    lines = [f"📍 <b>포지션 현황</b> ({kst_now.strftime('%H:%M KST')})"]
+    has_pos = False
+    for coin, state in all_states.items():
+        pos = state.get("position", 0)
+        if pos == 0:
+            continue
+        has_pos = True
+        dir_str   = "🟢 LONG" if pos == 1 else "🔴 SHORT"
+        entry_p   = state.get("avg_entry_price") or state.get("entry_price", 0)
+        last_px   = state.get("last_price", 0)
+        trail_sl  = state.get("af_trail_sl", 0)
+        pyr       = state.get("af_pyramid_count", 0)
+        lev       = state.get("entry_lev", 1)
+        rr        = state.get("entry_rr") or state.get("af_current_rr", 0.1)
+        unreal_str = ""
+        if last_px > 0 and entry_p > 0:
+            pnl_raw = pos * (last_px - entry_p) / (entry_p + 1e-9)
+            pnl_lev = pnl_raw * lev * rr
+            unreal_str = f" | 미실현 {pnl_lev:+.2%}"
+        dist_str = ""
+        if last_px > 0 and trail_sl > 0:
+            dist_pct = abs(last_px - trail_sl) / last_px * 100
+            dist_str = f" (-{dist_pct:.1f}%)"
+        lines.append(
+            f"<b>{coin}</b> {dir_str}{unreal_str}\n"
+            f"  avg진입={entry_p:,.4f} | 현재={last_px:,.4f}\n"
+            f"  trail SL={trail_sl:,.4f}{dist_str} | pyr={pyr}/3 | {lev}x"
+        )
+    if not has_pos:
+        lines.append("포지션 없음 (전 코인 관망 중)")
+    return "\n".join(lines)
+
+
+def _build_pnl_report(all_states: dict) -> str:
+    """오늘 실현 PnL 합계 + 코인별 요약."""
+    from datetime import timezone
+    kst_now = datetime.now(timezone.utc) + timedelta(hours=9)
+    lines = [f"💹 <b>오늘 PnL 보고</b> ({kst_now.strftime('%Y-%m-%d %H:%M KST')})"]
+    total_start = 0.0
+    total_cap   = 0.0
+    for coin, state in all_states.items():
+        capital  = state.get("capital", 0)
+        d_start  = state.get("daily_start_capital", capital)
+        d_ret    = (capital / (d_start + 1e-9) - 1) * 100
+        d_usdt   = capital - d_start
+        trades   = [t for t in state.get("trade_log", []) if t.get("pnl", 0) != 0]
+        n_today  = len(trades)
+        wins     = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        wr       = wins / n_today * 100 if n_today else 0
+        icon     = "🟢" if d_ret >= 0 else "🔴"
+        lines.append(
+            f"{icon} <b>{coin}</b>: {d_ret:+.2f}% ({d_usdt:+.1f} USDT)"
+            f" | {n_today}건 WR {wr:.0f}%"
+        )
+        total_start += d_start
+        total_cap   += capital
+    total_ret  = (total_cap / (total_start + 1e-9) - 1) * 100
+    total_usdt = total_cap - total_start
+    icon = "🟢" if total_ret >= 0 else "🔴"
+    lines.insert(1, f"{icon} <b>합계</b>: {total_ret:+.2f}% ({total_usdt:+.1f} USDT)\n")
+    return "\n".join(lines)
+
+
+def _build_help_message() -> str:
+    """사용 가능한 텔레그램 명령어 목록."""
+    return (
+        "🤖 <b>ConnectAI Trade Bot 명령어</b>\n\n"
+        "/account — 전체 코인 현황 (자본/포지션/미실현PnL/WR/MDD)\n"
+        "/pos — 현재 열린 포지션 빠른 확인\n"
+        "/pnl — 오늘 실현 PnL 합계 및 코인별 요약\n"
+        "/stop — 봇 즉시 종료 (모든 포지션 시장가 청산)\n"
+        "/help — 이 도움말 표시"
+    )
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 def main():
     load_env_file()
@@ -1085,6 +1181,15 @@ def main():
                     report = build_hourly_report_multi(all_states, mode, paper_mode)
                     send_trade_alert(report)
                     log.info("[텔레그램] /account 처리 완료")
+                if "/pos" in cmds:
+                    send_trade_alert(_build_pos_report(all_states))
+                    log.info("[텔레그램] /pos 처리 완료")
+                if "/pnl" in cmds:
+                    send_trade_alert(_build_pnl_report(all_states))
+                    log.info("[텔레그램] /pnl 처리 완료")
+                if "/help" in cmds:
+                    send_trade_alert(_build_help_message())
+                    log.info("[텔레그램] /help 처리 완료")
                 if "/stop" not in cmds:
                     return False
                 log.warning("[텔레그램] /stop 수신 → 봇 종료")
