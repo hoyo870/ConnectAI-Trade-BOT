@@ -20,19 +20,20 @@ BTC/USDT · ETH/USDT · SOL/USDT · XRP/USDT 5분봉 암호화폐 선물 자동�
 
 ---
 
-## 백테스트 성과 (2026 OOS: 2026-01-01 ~ 2026-05-31, ML 필터 포함)
+## 백테스트 성과 (2026 OOS: 2026-01-01 ~ 2026-06-23, ML 필터 포함)
 
-> 엔진: `backtest_af_exact.py` + AFEnsemble (theta=0.300, bb_sigma=0) — live_trader 완벽 모방
+> 엔진: `backtest_af_exact.py` + AFEnsemble (theta=0.300, bb_sigma=0) — live_trader 동일 로직  
+> 수수료: FEE_TOTAL=0.061%/side (실거래 49건 실측, Bybit taker 0.055% + 슬리피지 0.006%)
 
 | 코인 | 수익률 | TPD | MDD | WR | PF | Top-5 제거 | 판정 |
 |------|-------|-----|-----|-----|-----|-----------|------|
-| BTC  | +39.7%  | 2.83 ✅ | 18.6% | 21.9% | 1.238 | -27.6% ❌ | 2/3 ⚠️ |
-| ETH  | +100.5% | 4.17 ✅ | 28.0% | 24.6% | 1.287 | +1.0% ✅  | 3/3 ✅ |
-| SOL  | +383.3% | 4.76 ✅ | 22.4% | 23.7% | 1.547 | +83.4% ✅ | 3/3 ✅ |
-| XRP  | +110.7% | 3.85 ✅ | 28.4% | 22.2% | 1.322 | +7.2% ✅  | 3/3 ✅ |
+| BTC  | +5,077%    | 2.83 ✅ | 10.7% | 39.3% | 3.431 | +294.0% ✅ | 3/3 ✅ |
+| ETH  | +106,282%  | 4.13 ✅ | 17.8% | 41.0% | 3.613 | +606.5% ✅ | 3/3 ✅ |
+| SOL  | +1,303,654%| 4.76 ✅ | 14.7% | 39.1% | 4.214 | +839.7% ✅ | 3/3 ✅ |
+| XRP  | +55,869%   | 3.84 ✅ | 25.3% | 37.5% | 3.411 | +542.0% ✅ | 3/3 ✅ |
 
-> WR이 낮아도 수익인 이유: avg_win / avg_loss ≈ 4~5x (trailing stop 기반 손익비)  
-> BTC Top-5 제거 후 음수 — outlier 의존도 주의
+> WR ~40%에도 고수익인 이유: avg_win / avg_loss ≈ 4~5x (ATR trailing stop 기반 손익비)  
+> 피라미딩(최대 3레벨)이 수익 포지션을 증폭 — rr_final 비례로 수수료도 자동 스케일
 
 ---
 
@@ -78,11 +79,12 @@ python live_tools/live_trader.py
 ### 환경 변수 (.env)
 
 ```bash
-STRATEGY=antifragile     # 고정 (유일한 전략)
-TRADE_MODE=real          # real | sandbox | paper
-LEVERAGE=10              # 레버리지
+STRATEGY=antifragile          # 고정 (Antifragile 전용, DL v17 제거됨)
+TRADE_MODE=real               # real | sandbox | paper
+LEVERAGE=10                   # 레버리지
 ML_MODEL_DIR=models/af_ensemble/saved  # ML 모델 경로
-EXCHANGE=bybit           # bybit | bingx
+EXCHANGE=bybit                # bybit | bingx
+AF_PARAM_PRESET=              # '' (기본) | aggressive | conservative
 ```
 
 ### 로그 / 상태 파일
@@ -101,6 +103,10 @@ logs/live_state_xrp.json     ← XRP 상태
 
 유일한 공식 백테스트 엔진: `scripts/backtest_af_exact.py` (ML 필터 항상 포함)
 
+> **live_trader = backtest 전략 로직 완전 동일** — 허용된 차이 4가지만 존재:  
+> ① OHLCV 소스(실시간 vs 기록) ② 실행 타이밍(시장가 주문 vs 즉시 체결 가정)  
+> ③ 미세 슬리피지/수수료 ④ 시드/자본 기준
+
 ```bash
 # 2026 OOS 전체 (4코인)
 python scripts/backtest_af_exact.py --mode 2026 --coin all
@@ -108,8 +114,10 @@ python scripts/backtest_af_exact.py --mode 2026 --coin all
 # 랜덤 히스토리 10창 검증
 python scripts/backtest_af_exact.py --mode hist --coin all --windows 10 --seed 42
 
-# 특정 실거래 기간 재현
-python scripts/backtest_af_exact.py --mode jun1819 --coin all
+# 특정 실거래 기간 재현 (Jun 08~14 / Jun 15~22 / Jun 전체)
+python scripts/backtest_af_exact.py --mode jun0814 --coin all
+python scripts/backtest_af_exact.py --mode jun1522 --coin all
+python scripts/backtest_af_exact.py --mode jun --coin all
 ```
 
 Python API:
