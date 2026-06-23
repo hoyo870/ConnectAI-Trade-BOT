@@ -78,7 +78,8 @@ class AntifragileBacktestRunner:
     # ── 핵심 백테스트 루프 ────────────────────────────────────────────────────────
 
     def run(self, df: pd.DataFrame, df_ml: pd.DataFrame,
-            initial_capital: float = 10_000.0) -> dict:
+            initial_capital: float = 10_000.0,
+            cooldown_minutes: int = 0, cooldown_burst: int = 2) -> dict:
         """
         백테스트 실행 (기본 초기자본 $10,000).
         df:    load_coin()에서 반환된 첫 번째 요소
@@ -101,6 +102,13 @@ class AntifragileBacktestRunner:
         equity_curve = [capital]
         entry_ts     = None   # 현재 포지션 진입 타임스탬프 추적
 
+        # 쿨다운 상태 (direction → 쿨다운 해제 시각)
+        from collections import deque
+        from datetime import timedelta as _td
+        cooldown_until  = {1: None, -1: None}
+        recent_exits    = {1: deque(), -1: deque()}
+        _cd_window      = _td(minutes=cooldown_minutes) if cooldown_minutes > 0 else None
+
         for idx in range(1, len(df)):
             row      = df.iloc[idx]
             price    = float(row["close"])
@@ -113,8 +121,19 @@ class AntifragileBacktestRunner:
             if idx < len(df_ml):
                 strategy.update_context(df_ml, idx)
 
+            # 진입 차단 여부 결정
+            block_entry = False
+            if _cd_window and cur_ts is not None:
+                # 롱/숏 중 하나라도 쿨다운 중이면 block (방향은 tick 이후에 알지만
+                # 보수적으로 둘 다 활성 쿨다운이 있으면 차단)
+                for d in [1, -1]:
+                    if cooldown_until[d] and cur_ts < cooldown_until[d]:
+                        block_entry = True
+                        break
+
             prev_pos = strategy.pos
-            result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn)
+            result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn,
+                                           block_entry=block_entry)
 
             for event in result["events"]:
                 if event["type"] == "close":
@@ -134,6 +153,17 @@ class AntifragileBacktestRunner:
                         "exit_ts":   cur_ts,
                     })
                     entry_ts = None  # 청산 후 초기화
+
+                    # 쿨다운 상태 업데이트
+                    if _cd_window and cur_ts is not None:
+                        d = event["direction"]
+                        recent_exits[d].append(cur_ts)
+                        # 윈도우 밖 항목 제거
+                        while recent_exits[d] and cur_ts - recent_exits[d][0] > _cd_window:
+                            recent_exits[d].popleft()
+                        if len(recent_exits[d]) >= cooldown_burst:
+                            cooldown_until[d] = cur_ts + _cd_window
+                            recent_exits[d].clear()  # 쿨다운 발동 후 카운터 리셋
 
             # 진입 감지: 신규 진입(prev_pos==0) 또는 flip 후 재진입(entry_ts가 None인데 포지션 있음)
             if strategy.pos != 0 and entry_ts is None:

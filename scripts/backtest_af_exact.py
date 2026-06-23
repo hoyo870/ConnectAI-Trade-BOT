@@ -213,7 +213,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="live_trader 완벽 모방 백테스트 (ML 필수)")
     parser.add_argument("--coin",        default="all", choices=["btc", "eth", "sol", "xrp", "all"])
-    parser.add_argument("--mode",        default="2026", choices=["2026", "hist", "jun1819", "jun2022", "jun"])
+    parser.add_argument("--mode",        default="2026", choices=["2026", "hist", "jun0814", "jun1522", "jun"])
     parser.add_argument("--windows",     type=int, default=10)
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--window-days", type=int, default=91)
@@ -221,11 +221,16 @@ def main():
                         help=f"AFEnsemble 저장 디렉터리 (기본: .env ML_MODEL_DIR 또는 {_DEFAULT_MODEL})")
     parser.add_argument("--leverage",    type=int, default=_env_lev,
                         help=f"레버리지 (기본: .env LEVERAGE 또는 7)")
+    parser.add_argument("--hide-details", action="store_true", default=True,
+                        help="거래 상세 로그 출력 생략 (Jun 18~19, Jun 20~22, Jun 모드에서만 적용)")
+    parser.add_argument("--skip-charts", action="store_true", default=True,
+                        help="차트 저장 생략 (Jun 18~19, Jun 20~22, Jun 모드에서만 적용)")
     args = parser.parse_args()
 
     # live_trader.py와 동일: AF_PARAM_PRESET 프리셋 적용
     af_params = {**DEFAULT_PARAMS, "leverage": args.leverage}
     preset_name = os.getenv("AF_PARAM_PRESET", "").lower()
+    # preset_name = 'aggressive'
     if preset_name and preset_name != "prod" and preset_name in _PRESET_DEFS:
         af_params.update(get_preset(preset_name))
     af_params["leverage"] = args.leverage  # LEVERAGE는 프리셋보다 우선
@@ -241,6 +246,7 @@ def main():
         print(f"\n{'█'*66}")
         print(f"  {label}/USDT — live_trader 완벽 모방 백테스트 [ML 필수]")
         print(f"  BB σ={_BB_SIGMA}  ML theta={runner.ensemble.threshold:.3f}")
+        print(f"  AF_PARAM_PRESET={preset_name or 'prod(기본)'}  (.env LEVERAGE: x{args.leverage})")
         print(f"{'█'*66}")
 
         if args.mode == "2026":
@@ -251,7 +257,8 @@ def main():
             print(f"\n[{label}] 2026 OOS: {df.index[0].date()} ~ {df.index[-1].date()}  ({days}일)")
             res = runner.run(df, df_ml)
             runner.print_result(f"{label} 2026 OOS", res, days)
-            _save_charts(label, "2026", df, res)
+            if not args.skip_charts:
+                _save_charts(label, "2026", df, res)
 
         elif args.mode == "hist":
             hs = HIST_START.get(coin, "2020-01-01")
@@ -259,35 +266,39 @@ def main():
             runner.run_hist_validation(coin, seed=args.seed, windows=args.windows,
                                        window_days=args.window_days, hist_start=hs)
 
-        elif args.mode == "jun1819":
-            df, df_ml = runner.load_coin(coin, start="2026-06-18 03:37", end="2026-06-19 12:00")
+        elif args.mode == "jun0814":
+            df, df_ml = runner.load_coin(coin, start="2026-06-08 00:00", end="2026-06-14 23:59")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).total_seconds() / 86400
-            print(f"\n[{label}] Jun 18~19 실거래 기간")
+            print(f"\n[{label}] Jun 08~14 실거래 기간")
             res = runner.run(df, df_ml)
-            runner.print_result(f"{label} Jun18~19", res, days)
-            print(f"\n  상세 거래:")
-            for t in res["trade_log"]:
-                dr   = "롱" if t["direction"] == 1 else "숏"
-                flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
-                print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_charts(label, "jun1819", df, res)
+            runner.print_result(f"{label} Jun08~14", res, days)
+            if not args.hide_details:
+                print(f"\n  상세 거래:")
+                for t in res["trade_log"]:
+                    dr   = "롱" if t["direction"] == 1 else "숏"
+                    flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
+                    print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
+            if not args.skip_charts:
+                _save_charts(label, "jun0814", df, res)
 
-        elif args.mode == "jun2022":
-            df, df_ml = runner.load_coin(coin, start="2026-06-20 18:30", end="2026-06-22 13:30")
+        elif args.mode == "jun1522":
+            df, df_ml = runner.load_coin(coin, start="2026-06-15 00:00", end="2026-06-22 23:59")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).total_seconds() / 86400
-            print(f"\n[{label}] Jun 20~22 실거래 기간")
+            print(f"\n[{label}] Jun 15~22 실거래 기간")
             res = runner.run(df, df_ml)
-            runner.print_result(f"{label} Jun20~22", res, days)
-            print(f"\n  상세 거래:")
-            for t in res["trade_log"]:
-                dr   = "롱" if t["direction"] == 1 else "숏"
-                flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
-                print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_charts(label, "jun2022", df, res)
+            runner.print_result(f"{label} Jun15~22", res, days)
+            if not args.hide_details:
+                print(f"\n  상세 거래:")
+                for t in res["trade_log"]:
+                    dr   = "롱" if t["direction"] == 1 else "숏"
+                    flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
+                    print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
+            if not args.skip_charts:
+                _save_charts(label, "jun1522", df, res)
 
         elif args.mode == "jun":
             df, df_ml = runner.load_coin(coin, start="2026-06-01 00:00", end="2026-06-22 17:00")
@@ -297,12 +308,14 @@ def main():
             print(f"\n[{label}] Jun 01~22 실거래 기간")
             res = runner.run(df, df_ml)
             runner.print_result(f"{label} Jun01~22", res, days)
-            print(f"\n  상세 거래:")
-            for t in res["trade_log"]:
-                dr   = "롱" if t["direction"] == 1 else "숏"
-                flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
-                print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
-            _save_charts(label, "jun", df, res)
+            if not args.hide_details:
+                print(f"\n  상세 거래:")
+                for t in res["trade_log"]:
+                    dr   = "롱" if t["direction"] == 1 else "숏"
+                    flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
+                    print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
+            if not args.skip_charts:
+                _save_charts(label, "jun", df, res)
 
 
 if __name__ == "__main__":

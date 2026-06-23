@@ -49,10 +49,11 @@ PRESETS: dict[str, dict] = {
     },
     "aggressive": {
         # 넓은 진입 조건 + 빠른 trail → 거래 빈도↑, MDD↑
-        "dt_rsi_lo": 25, "dt_rsi_hi": 60,
-        "ut_rsi_lo": 42, "ut_rsi_hi": 78,
-        "trail_atr_init": 0.8, "trail_atr_tight": 1.5,
-        "add_levels": 4,
+        "dt_rsi_lo": 15, "dt_rsi_hi": 85,
+        "ut_rsi_lo": 25, "ut_rsi_hi": 95,
+        "trail_atr_init": 0.8, "trail_atr_tight": 1.25,
+        #"rr_base": 0.3, "rr_add": 0.2,
+        "add_levels": 6,
     },
     "conservative": {
         # 엄격한 진입 + 넓은 trail → 거래 빈도↓, 손절 여유↑

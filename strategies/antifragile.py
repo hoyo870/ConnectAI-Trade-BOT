@@ -94,6 +94,7 @@ class AntifragileStrategy:
         rsi: float,
         trend_up: bool,
         trend_down: bool,
+        block_entry: bool = False,
     ) -> dict:
         """
         하나의 봉을 처리하고 발생 이벤트 목록을 반환.
@@ -169,7 +170,7 @@ class AntifragileStrategy:
                     })
 
         # ── 신규 진입 ────────────────────────────────────────────────────────
-        if self.pos == 0:
+        if self.pos == 0 and not block_entry:
             long_ok  = rsi <= rsi_lo
             short_ok = (rsi >= rsi_hi) and not long_ok
 
