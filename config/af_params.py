@@ -6,8 +6,8 @@ strategies/backtest_engine.py + live_tools/live_trader.py 공유.
 
 # ── 수수료 상수 ──────────────────────────────────────────────────────────────
 TRADING_FEE = 0.00055   # Bybit taker 실측 0.055%
-SLIPPAGE    = 0.00056   # 실거래 관측 평균 슬리피지 0.056%
-FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # 0.111%/side
+SLIPPAGE    = 0.000060  # measured avg slippage 0.0046% + 20% safety margin
+FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # total per side (≈ 0.061%)
 
 # ── 실거래 전용 상수 ─────────────────────────────────────────────────────────
 EMERGENCY_SL_ATR = 6.0  # intrabar wick SL 조기 체결 방지용 넓은 SL 배수
