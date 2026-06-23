@@ -116,7 +116,7 @@ function renderProcesses(procs) {
     </div>`).join('');
 }
 
-function renderCoins(coins) {
+function renderCoins(coins, leverage) {
   const el = document.getElementById('coin-cards');
   el.innerHTML = Object.entries(coins).map(([c, s]) => {
     const posLabel = s.position === 0
@@ -124,17 +124,38 @@ function renderCoins(coins) {
       : s.position === 1
         ? `<span style="color:var(--up);font-weight:600">LONG ▲</span>`
         : `<span style="color:var(--down);font-weight:600">SHORT ▼</span>`;
-    const halt = s.daily_halt ? '<span style="color:var(--down)" title="일일 한도 초과">⬤</span> ' : '';
-    const detail = s.position !== 0 && s.entry_price > 0
-      ? `<div style="font-size:.68rem;color:var(--dim);margin-top:3px;padding-left:2px">
-           진입 <span style="color:var(--muted)">${s.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</span>
-           &nbsp;·&nbsp;
-           Trail <span style="color:var(--warn)">${s.trail_sl > 0 ? s.trail_sl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '-'}</span>
-         </div>`
-      : '';
+
+    let detail = '';
+    if (s.position !== 0 && s.entry_price > 0) {
+      const lev = s.entry_lev || leverage || 1;
+      const rr  = s.entry_rr  || 0.1;
+      let unrealStr = '';
+      if (s.last_price > 0) {
+        const pnlRaw = s.position * (s.last_price - s.entry_price) / s.entry_price;
+        const pnlLev = pnlRaw * lev * rr;
+        const pnlColor = pnlLev >= 0 ? 'var(--up)' : 'var(--down)';
+        const pnlSign  = pnlLev >= 0 ? '+' : '';
+        unrealStr = ` &nbsp;<span style="color:${pnlColor};font-weight:600">${pnlSign}${(pnlLev * 100).toFixed(2)}%</span>`;
+      }
+      let trailStr = '-';
+      if (s.trail_sl > 0) {
+        trailStr = s.trail_sl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+        if (s.last_price > 0) {
+          const distPct = Math.abs(s.last_price - s.trail_sl) / s.last_price * 100;
+          trailStr += ` <span style="color:var(--dim)">(-${distPct.toFixed(1)}%)</span>`;
+        }
+      }
+      const pyrStr = s.pyramid_cnt > 0
+        ? ` &nbsp;<span style="color:var(--warn)">pyr ${s.pyramid_cnt}/3</span>` : '';
+      detail = `<div style="font-size:.68rem;color:var(--dim);margin-top:4px;line-height:1.6">
+        <span>avg진입 <span style="color:var(--muted)">${s.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</span>${unrealStr}${pyrStr}</span><br>
+        <span>trail SL <span style="color:var(--warn)">${trailStr}</span> &nbsp;·&nbsp; 현재 <span style="color:var(--text)">${s.last_price > 0 ? s.last_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '-'}</span></span>
+      </div>`;
+    }
+
     return `<div style="padding:.55rem 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;justify-content:space-between;align-items:center;font-size:.85rem">
-        <span style="color:${COIN_COLORS[c] || '#94a3b8'};font-weight:600">${halt}${c}</span>
+        <span style="color:${COIN_COLORS[c] || '#94a3b8'};font-weight:600">${c}</span>
         <span style="font-family:monospace;font-size:.8rem">$${s.capital.toFixed(2)}</span>
         <span style="font-size:.75rem">${posLabel}</span>
       </div>${detail}
@@ -162,7 +183,7 @@ async function updateStatus() {
     const kpiLev = document.getElementById('kpi-leverage');
     if (kpiLev) kpiLev.textContent = (d.leverage || '-') + (d.leverage ? 'x' : '');
     renderProcesses(d.processes);
-    renderCoins(d.coins);
+    renderCoins(d.coins, d.leverage);
   } catch (e) { console.warn('status err', e); }
 }
 
