@@ -126,7 +126,6 @@ DEFAULT_STATE = {
     "peak_capital":        INITIAL_CAPITAL,
     "daily_start_capital": INITIAL_CAPITAL,
     "daily_date":          None,
-    "daily_halt":          False,
     "tg_update_offset":    0,
     "trade_log":       [],
     # ── Antifragile Trailing Stop 전용 상태 ──────────────────────────────
@@ -310,7 +309,7 @@ def process_tick_af(exchange, df: pd.DataFrame, state: dict, price: float,
     log.info(
         f"[{coin}/AF 신호] ts={candle_ts} price={price:,.4f} "
         f"RSI={rsi:.1f} trend={trend_str} lo={rsi_lo} hi={rsi_hi} "
-        f"long={long_ok_now} short={short_ok_now} pos={pos} halt={state.get('daily_halt', False)}"
+        f"long={long_ok_now} short={short_ok_now} pos={pos}"
     )
 
     # ── AF 상태 안전 초기화 (구버전 state 로드 또는 첫 실행 시) ───────────────────
@@ -626,7 +625,6 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 log.warning(f"[{coin} PnL히스토리 조회실패] {_he}")
         state["daily_start_capital"] = state["capital"]
         state["daily_date"]  = today
-        state["daily_halt"]  = False
         log.info(f"[{coin} 일일리셋] 시작자본={state['capital']:.0f} USDT")
 
     if not paper_mode and state.get("position", 0) == 0:
@@ -648,21 +646,6 @@ def _run_coin_tick_af(exchange, coin: str, state: dict, paper_mode: bool,
                 pass
     else:
         state["_bars_since_balance_sync"] = 0  # 포지션 보유 중엔 카운터 리셋
-
-    _halt_enabled = os.getenv("DAILY_HALT_ENABLED", "false").lower() in ("1", "true", "yes")
-    if _halt_enabled and state.get("daily_halt"):
-        log.info(f"[{coin}/AF 스킵] daily_halt=True")
-        return state
-
-    daily_start    = state.get("daily_start_capital", state["capital"])
-    daily_loss_pct = (state["capital"] - daily_start) / (daily_start + 1e-9)
-    if _halt_enabled and daily_loss_pct <= -0.02:
-        log.warning(f"[{coin}] 일일 손실 한도 {daily_loss_pct:.2%} → 금일 거래 중단")
-        if state["position"] != 0:
-            _close_and_log(exchange, state, price, now_str, forced=True, reason="일일한도",
-                           paper_mode=paper_mode, paper_trade_csv=paper_trade_csv)
-        state["daily_halt"] = True
-        return state
 
     return process_tick_af(exchange, df, state, price, now_str, paper_mode, paper_trade_csv, ensemble=ensemble)
 
