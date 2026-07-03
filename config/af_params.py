@@ -5,9 +5,14 @@ strategies/backtest_engine.py + live_tools/live_trader.py 공유.
 """
 
 # ── 수수료 상수 ──────────────────────────────────────────────────────────────
-TRADING_FEE = 0.00055   # Bybit taker 실측 0.055%
-SLIPPAGE    = 0.000060  # measured avg slippage 0.0046% + 20% safety margin
-FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # total per side (≈ 0.061%)
+TRADING_FEE = 0.00055   # Bybit taker 실측 0.055% (per side)
+SLIPPAGE    = 0.000060  # measured avg slippage 0.0046% + 20% safety margin (per side)
+FEE_TOTAL   = TRADING_FEE + SLIPPAGE  # total per side (≈ 0.061%). 왕복은 2×FEE_TOTAL.
+
+# ── Funding 비용 (무기한 선물) ───────────────────────────────────────────────
+# 8h마다 부과되는 funding을 보유봉수 비례로 비용 근사. 방향/부호와 무관하게 보수적
+# 비용(절대값)으로 모델링. 실거래는 거래소 realized_pnl에 이미 반영됨.
+FUNDING_RATE_8H = 0.0001  # 8시간당 ≈0.01% (BTC perp 평균 근사). cost_mult로 민감도 조정.
 
 # ── 실거래 전용 상수 ─────────────────────────────────────────────────────────
 EMERGENCY_SL_ATR = 6.0  # intrabar wick SL 조기 체결 방지용 넓은 SL 배수
@@ -26,8 +31,11 @@ DEFAULT_PARAMS = {
     "trail_atr_tight": 1.5,   # 피라미딩 후 tight trailing (0.8→1.5, 2026-06-09)
     # ── 포지션 사이징 ─────────────────────────────────────────────────────────
     "rr_base":         0.10,  # 초기 자본 위험 비율
-    "rr_add":          0.15,  # 피라미딩 1회당 추가 비율
-    "add_levels":      3,     # 최대 피라미딩 횟수
+    "rr_add":          0.15,  # 피라미딩 1회당 추가 비율 (add_levels=0이면 미사용)
+    # 피라미딩 비활성 (0): add-to-winner + peak 기준 trailing stop 조합이 가중평균 손실
+    # 쪽에서 청산되어 구조적 손실 — project_pnl_accounting_fix 검증. 단일진입으로 기본
+    # 신호 엣지부터 정직하게 검증. 재설계 전까지 0 유지 (코드 보존, 값만 되돌리면 복원).
+    "add_levels":      0,     # 최대 피라미딩 횟수 (3→0, 2026-06-24)
     "atr_add_step":    0.5,   # 피라미딩 트리거 (유리방향 X×ATR마다)
     # ── ML 필터 ───────────────────────────────────────────────────────────────
     "ml_threshold":    None,  # float 0-1 if ML active, None = disabled
@@ -40,12 +48,22 @@ PRESETS: dict[str, dict] = {
     "prod": {
         # DEFAULT_PARAMS 그대로 사용
     },
+    "candidate": {
+        # 2026-06-24 과적합방지 스윕 검증 후보 (project_param_sweep): δ=10 선별강화 + trail 2.0.
+        # ML θ=0.45는 .env ML_THRESHOLD로 적용. 4코인 held-out TEST + 비용2배 통과.
+        # forward(paper) 검증용. 저레버리지(.env LEVERAGE=3)로 가동 권장.
+        "dt_rsi_lo": 12, "dt_rsi_hi": 75,
+        "rg_rsi_lo": 20, "rg_rsi_hi": 80,
+        "ut_rsi_lo": 30, "ut_rsi_hi": 95,
+        "trail_atr_init": 2.0,
+        "add_levels": 0,
+    },
     "stable": {
         # 보수적 진입 + 타이트한 trail → 안정적 수익, 높은 hist 통과율
         "dt_rsi_lo": 30, "dt_rsi_hi": 60,
         "ut_rsi_lo": 42, "ut_rsi_hi": 70,
         "trail_atr_init": 1.5, "trail_atr_tight": 2.0,
-        "add_levels": 4,
+        "add_levels": 0,   # 피라미딩 비활성 (4→0, 2026-06-24) — DEFAULT_PARAMS 주석 참조
     },
     "aggressive": {
         # 넓은 진입 조건 + 빠른 trail → 거래 빈도↑, MDD↑
@@ -53,14 +71,14 @@ PRESETS: dict[str, dict] = {
         "ut_rsi_lo": 25, "ut_rsi_hi": 95,
         "trail_atr_init": 0.8, "trail_atr_tight": 1.25,
         #"rr_base": 0.3, "rr_add": 0.2,
-        "add_levels": 6,
+        "add_levels": 0,   # 피라미딩 비활성 (6→0, 2026-06-24) — DEFAULT_PARAMS 주석 참조
     },
     "conservative": {
         # 엄격한 진입 + 넓은 trail → 거래 빈도↓, 손절 여유↑
         "dt_rsi_lo": 28, "dt_rsi_hi": 70,
         "ut_rsi_lo": 42, "ut_rsi_hi": 78,
         "trail_atr_init": 2.0, "trail_atr_tight": 2.5,
-        "add_levels": 3,
+        "add_levels": 0,   # 피라미딩 비활성 (3→0, 2026-06-24) — DEFAULT_PARAMS 주석 참조
     },
 }
 

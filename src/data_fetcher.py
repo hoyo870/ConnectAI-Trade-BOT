@@ -34,37 +34,46 @@ def fetch_ohlcv(
     start_date: str = "2022-01-01",
     end_date:   Optional[str] = None,
     save: bool  = True,
+    exchange_name: str = "binance",
+    out_dir:    Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Binance에서 OHLCV 데이터를 페이지네이션으로 전체 다운로드.
+    거래소에서 OHLCV 데이터를 페이지네이션으로 전체 다운로드.
 
     Parameters
     ----------
-    symbol     : 거래 쌍 (ex. 'BTC/USDT')
-    timeframe  : 봉 단위 (ex. '5m', '1h', '1d')
-    start_date : 시작일 (YYYY-MM-DD)
-    end_date   : 종료일 (None이면 현재 시각)
-    save       : True면 data/raw/ 에 CSV 저장
+    symbol        : 거래 쌍 (ex. 'BTC/USDT')
+    timeframe     : 봉 단위 (ex. '5m', '1h', '1d')
+    start_date    : 시작일 (YYYY-MM-DD)
+    end_date      : 종료일 (None이면 현재 시각)
+    save          : True면 CSV 저장
+    exchange_name : 'binance'(기본) | 'bybit'(linear perp, 실거래 소스와 일치)
+    out_dir       : 저장 디렉터리 (None이면 data/raw/). bybit는 data/bybit/ 권장.
 
     Returns
     -------
     DataFrame with columns: timestamp, open, high, low, close, volume
     """
-    exchange = ccxt.binance({"enableRateLimit": True})
+    if exchange_name == "bybit":
+        exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
+        fetch_params = {"category": "linear"}
+    else:
+        exchange = ccxt.binance({"enableRateLimit": True})
+        fetch_params = {}
 
     since_ms = _parse_dt(start_date)
     until_ms  = _parse_dt(end_date) if end_date else int(time.time() * 1000)
-    limit     = 1000   # Binance 최대 요청 수
+    limit     = 1000   # 최대 요청 수
 
     sym_label  = symbol.replace("/", "")
-    print(f"[Fetcher] {symbol} {timeframe} | {start_date} ~ {end_date or 'now'}")
+    print(f"[Fetcher/{exchange_name}] {symbol} {timeframe} | {start_date} ~ {end_date or 'now'}")
 
     all_candles: list = []
     cursor = since_ms
 
     while cursor < until_ms:
         try:
-            candles = exchange.fetch_ohlcv(symbol, timeframe, since=cursor, limit=limit)
+            candles = exchange.fetch_ohlcv(symbol, timeframe, since=cursor, limit=limit, params=fetch_params)
         except ccxt.NetworkError as e:
             print(f"[Fetcher] 네트워크 오류: {e} — 5초 후 재시도")
             time.sleep(5)
@@ -102,8 +111,9 @@ def fetch_ohlcv(
     print(f"[Fetcher] 완료: {len(df):,} 봉 | {df['timestamp'].iloc[0]} ~ {df['timestamp'].iloc[-1]}")
 
     if save:
-        os.makedirs(RAW_DIR, exist_ok=True)
-        fname = f"{RAW_DIR}/{sym_label}_{timeframe}_{start_date[:10].replace('-','')}_{(end_date or 'now')[:10].replace('-','')}.csv"
+        save_dir = out_dir or RAW_DIR
+        os.makedirs(save_dir, exist_ok=True)
+        fname = f"{save_dir}/{sym_label}_{timeframe}_{start_date[:10].replace('-','')}_{(end_date or 'now')[:10].replace('-','')}.csv"
         df.to_csv(fname, index=False)
         print(f"[Fetcher] 저장: {fname}")
 

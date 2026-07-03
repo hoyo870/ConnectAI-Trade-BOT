@@ -1,5 +1,11 @@
 # Antifragile Trailing Stop 전략
 
+> ⚠️ **[2026-06-24] 이 문서의 백테스트 수익 수치(예: avg +212%/3개월, +1547% 등)는 무효(과대계상)입니다.**
+> add-to-winner 피라미딩 PnL을 최초진입가로 계산하던 회계 버그로 손실 전략이 큰 수익으로 표시됐습니다.
+> 가중평균(거래소 실현손익) 기준 수정 시 피라미딩은 구조적 손실(BTC 2026 OOS +수익 → −48.7%)로 판명되어
+> 비활성화(`add_levels=0`)했습니다. 정직한 단일진입 재베이스라인 진행 중 — 상세: 메모리 `project_pnl_accounting_fix`,
+> 계획 `~/.claude/plans/cosmic-leaping-goblet.md`.
+
 > 승격일: 2026-06-03 | 검증: BTC 9/10 · ETH 10/10 · SOL 10/10 · XRP 10/10  
 > 백테스트 스크립트: `scripts/backtest_antifragile.py`  
 > 활성화: `.env`에 `STRATEGY=antifragile` → 4종목 자동 25%씩 분할 매매  

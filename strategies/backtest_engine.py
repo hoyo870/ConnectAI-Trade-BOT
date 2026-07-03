@@ -21,7 +21,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import numpy as np
 import pandas as pd
 
-from config.af_params import FEE_TOTAL, DEFAULT_PARAMS
+from config.af_params import FEE_TOTAL, DEFAULT_PARAMS, EMERGENCY_SL_ATR, FUNDING_RATE_8H
 from config.loader import load_coin_raw
 from models.af_ensemble.ensemble import AFEnsemble
 from models.af_ensemble.feature_extractor import add_ml_features
@@ -29,6 +29,49 @@ from strategies.antifragile import AntifragileStrategy
 from strategies.indicators import add_indicators, add_indicators_af
 
 _BB_SIGMA = 0  # live_trader.py와 동일: bb_sigma=0 (EMA 크로스, BB 미사용)
+
+
+def _net_pnl(pnl_raw: float, rr: float, hold_bars: int, lev: float,
+             cost_mult: float = 1.0) -> float:
+    """비용 차감 후 자본 수익률.
+    비용 = 왕복 수수료+슬리피지(2×FEE_TOTAL, 진입+청산) + 보유 funding(96봉=8h당 FUNDING_RATE_8H).
+    cost_mult: 비용 민감도 배수(1=기본, 2/3=보수적 스트레스). 손실은 -rr로 캡(청산)."""
+    fee   = 2 * FEE_TOTAL
+    fund  = (hold_bars / 96.0) * FUNDING_RATE_8H
+    gross = pnl_raw - (fee + fund) * cost_mult
+    return max(gross * lev * rr, -rr)
+
+
+def robust_metrics(trade_log: list) -> dict:
+    """아웃라이어/꼬리위험에 강건한 보조 지표 (약한 3/3 게이트 보완).
+    sharpe/sortino: 거래당 손익 평균/표준편차(하방). top5_share: 양수수익 중 상위 5거래 비중
+    (1에 가까울수록 소수 대박에 의존). max_consec_loss: 최대 연속손실. pct_from_top10: 전체
+    순수익 중 상위 10% 거래 기여율(>100%면 나머지는 순손실 = 아웃라이어 의존)."""
+    pnls = [t["pnl"] for t in trade_log]
+    if not pnls:
+        return {"sharpe": 0.0, "sortino": 0.0, "top5_share": 0.0,
+                "max_consec_loss": 0, "pct_from_top10": 0.0}
+    arr  = np.array(pnls, dtype=float)
+    mean, std = arr.mean(), arr.std()
+    downside  = arr[arr < 0]
+    dstd = downside.std() if len(downside) else 0.0
+    pos  = arr[arr > 0]
+    total_pos = float(pos.sum())
+    top5_share = float(np.sort(pos)[-5:].sum() / total_pos) if total_pos > 0 else 0.0
+    mc = cur = 0
+    for pl in pnls:
+        cur = cur + 1 if pl <= 0 else 0
+        mc  = max(mc, cur)
+    k   = max(1, int(len(arr) * 0.1))
+    tot = float(arr.sum())
+    pct_from_top10 = float(np.sort(arr)[-k:].sum() / tot * 100) if tot > 0 else float("inf")
+    return {
+        "sharpe":  float(mean / std) if std > 0 else 0.0,
+        "sortino": float(mean / dstd) if dstd > 0 else 0.0,
+        "top5_share": top5_share,
+        "max_consec_loss": int(mc),
+        "pct_from_top10": pct_from_top10,
+    }
 
 
 class AntifragileBacktestRunner:
@@ -78,11 +121,15 @@ class AntifragileBacktestRunner:
     # ── 핵심 백테스트 루프 ────────────────────────────────────────────────────────
 
     def run(self, df: pd.DataFrame, df_ml: pd.DataFrame,
-            initial_capital: float = 10_000.0) -> dict:
+            initial_capital: float = 10_000.0,
+            intrabar_emergency_sl: bool = True,
+            cost_mult: float = 1.0) -> dict:
         """
         백테스트 실행 (기본 초기자본 $10,000).
         df:    load_coin()에서 반환된 첫 번째 요소
         df_ml: load_coin()에서 반환된 두 번째 요소
+        intrabar_emergency_sl: True면 실거래 거래소 위탁 SL(EMERGENCY_SL_ATR)을 봉 high/low로
+            intrabar 체결 모사. tight trailing stop은 실거래도 봉 종가 기준이라 close로 유지.
         """
         df = df.reset_index()          # datetime 인덱스 → '_ts' 컬럼으로 보존
         df.rename(columns={"timestamp": "_ts", "index": "_ts"}, inplace=True)
@@ -100,6 +147,8 @@ class AntifragileBacktestRunner:
         trade_log    = []
         equity_curve = [capital]
         entry_ts     = None   # 현재 포지션 진입 타임스탬프 추적
+        entry_idx    = 0      # funding 비용용 진입 봉 인덱스
+        have_hl      = {"high", "low"}.issubset(df.columns)
 
         for idx in range(1, len(df)):
             row      = df.iloc[idx]
@@ -110,17 +159,47 @@ class AntifragileBacktestRunner:
             trend_dn = bool(row["_trend_down"])
             cur_ts   = df.at[idx, "_ts"] if "_ts" in df.columns else None
 
+            # ── intrabar emergency SL: 거래소 위탁 SL(6×ATR)을 봉 wick로 체결 모사 ──
+            # 실거래는 봉 사이 wick가 emergency SL에 닿으면 거래소가 즉시 체결(EX_SL).
+            # 종가 기준 trailing stop만 보는 백테스트는 이 꼬리손실을 놓쳐 MDD를 과소평가함.
+            emergency_closed = False
+            if intrabar_emergency_sl and strategy.pos != 0 and have_hl:
+                pos0    = strategy.pos
+                ent_atr = strategy.entry_atr or atr
+                emerg   = (strategy.avg_entry - EMERGENCY_SL_ATR * ent_atr) if pos0 == 1 \
+                          else (strategy.avg_entry + EMERGENCY_SL_ATR * ent_atr)
+                hit = (pos0 == 1 and float(row["low"])  <= emerg) or \
+                      (pos0 == -1 and float(row["high"]) >= emerg)
+                if hit:
+                    rr_c    = strategy.rr
+                    pnl_raw = pos0 * (emerg - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
+                    pnl     = _net_pnl(pnl_raw, rr_c, idx - entry_idx, lev, cost_mult)
+                    capital *= (1 + pnl)
+                    peak_cap = max(peak_cap, capital)
+                    trade_log.append({
+                        "pnl": pnl, "direction": pos0, "reason": "EX_SL",
+                        "capital": round(capital, 2),
+                        "entry": round(strategy.avg_entry, 6), "exit": round(emerg, 6),
+                        "entry_ts": entry_ts, "exit_ts": cur_ts,
+                    })
+                    entry_ts = None
+                    # process_tick close와 동일하게 포지션 상태 리셋
+                    strategy.pos = 0; strategy.avg_entry = 0.0; strategy.entry_atr = 0.0
+                    strategy.rr = strategy.p["rr_base"]; strategy.add_cnt = 0
+                    strategy.trail_sl = 0.0; strategy.peak_px = 0.0
+                    emergency_closed = True
+
             if idx < len(df_ml):
                 strategy.update_context(df_ml, idx)
 
-            prev_pos = strategy.pos
-            result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn)
+            # emergency 체결 시 같은 봉 재진입 차단(실거래는 다음 봉에 EX_SL 감지 후 진입 가능)
+            result = strategy.process_tick(price, atr, rsi, trend_up, trend_dn,
+                                           block_entry=emergency_closed)
 
             for event in result["events"]:
                 if event["type"] == "close":
-                    # 구형 run_antifragile_ml 동일 수수료 모델:
-                    # 수수료를 pnl_raw에서 먼저 차감 → 레버리지×rr로 증폭 (왕복 2×FEE_TOTAL)
-                    pnl = max((event["pnl_raw"] - 2 * FEE_TOTAL) * lev * event["rr"], -event["rr"])
+                    # 비용(왕복 수수료+슬리피지+funding) 차감 후 lev×rr 증폭. _net_pnl 참조.
+                    pnl = _net_pnl(event["pnl_raw"], event["rr"], idx - entry_idx, lev, cost_mult)
                     capital  *= (1 + pnl)
                     peak_cap  = max(peak_cap, capital)
                     trade_log.append({
@@ -137,7 +216,8 @@ class AntifragileBacktestRunner:
 
             # 진입 감지: 신규 진입(prev_pos==0) 또는 flip 후 재진입(entry_ts가 None인데 포지션 있음)
             if strategy.pos != 0 and entry_ts is None:
-                entry_ts = cur_ts
+                entry_ts  = cur_ts
+                entry_idx = idx
 
             if strategy.pos != 0:
                 unr = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
@@ -151,7 +231,7 @@ class AntifragileBacktestRunner:
         if strategy.pos != 0 and len(df) > 0:
             price = float(df.iloc[-1]["close"])
             raw   = strategy.pos * (price - strategy.avg_entry) / (strategy.avg_entry + 1e-9)
-            pnl   = max((raw - 2 * FEE_TOTAL) * lev * strategy.rr, -strategy.rr)
+            pnl   = _net_pnl(raw, strategy.rr, (len(df) - 1) - entry_idx, lev, cost_mult)
             capital *= (1 + pnl)
             trade_log.append({"pnl": pnl, "direction": strategy.pos, "reason": "end",
                                "capital": round(capital, 2)})
@@ -178,6 +258,7 @@ class AntifragileBacktestRunner:
                 "total_return": total_return, "n_trades": n, "win_rate": wr,
                 "profit_factor": pf, "avg_win": avg_win, "avg_loss": avg_loss,
                 "mdd": mdd, "n_flips": len(flips),
+                **robust_metrics(trade_log),
             },
         }
 
@@ -261,4 +342,13 @@ class AntifragileBacktestRunner:
         print(f"  Top-5 제거: {r5:+.2f}%  {'✅' if ok_top else '❌'}")
         print(f"  flip 발동:  {len(flips)}건")
         print(f"  판정:       {p}/3  {'✅ 통과' if p==3 else ('⚠️ 부분' if p>=2 else '❌ 탈락')}")
+        # ── 강건 지표 (아웃라이어/꼬리위험) ──
+        sh, so = m.get("sharpe", 0.0), m.get("sortino", 0.0)
+        t5, p10 = m.get("top5_share", 0.0), m.get("pct_from_top10", 0.0)
+        mcl = m.get("max_consec_loss", 0)
+        conc_flag = "⚠️ 아웃라이어 의존" if (p10 > 80 or t5 > 0.6) else "✅"
+        print(f"  ─ 강건지표 ─")
+        print(f"  Sharpe/Sortino(거래당): {sh:+.3f} / {so:+.3f}")
+        print(f"  수익집중: 상위10%거래 기여 {p10:.0f}%, 양수 중 top5 비중 {t5*100:.0f}%  {conc_flag}")
+        print(f"  최대 연속손실: {mcl}회")
         return p

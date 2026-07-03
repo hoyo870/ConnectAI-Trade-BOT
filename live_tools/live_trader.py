@@ -44,7 +44,7 @@ from exchange_client import (
     get_last_closed_price,
 )
 from telegram_notifier import send_trade_alert, poll_commands, get_credentials
-from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
+from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset, FEE_TOTAL, FUNDING_RATE_8H
 from strategies.antifragile import AntifragileStrategy
 from strategies.indicators import compute_scalar_indicators
 from models.af_ensemble.ensemble import AFEnsemble
@@ -720,7 +720,14 @@ def _close_and_log(exchange, state, price, now_str, forced=False, reason="",
         pnl = 0.0
     else:
         pnl_raw = pos * (mark_px - entry_price) / entry_price  # 신호가 아닌 실체결가 사용
-        pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
+        if paper_mode:
+            # 실거래는 거래소 realized_pnl로 수수료 자동 반영되나, paper는 gross라 낙관 편향.
+            # 백테스트 _net_pnl 과 동일 비용(왕복 2×FEE_TOTAL + 보유 funding) 명시 차감.
+            _hb   = state["current_bar"] - state["entry_bar"]
+            _cost = 2 * FEE_TOTAL + (_hb / 96.0) * FUNDING_RATE_8H
+            pnl = max((pnl_raw - _cost) * entry_lev * entry_rr, -entry_rr)
+        else:
+            pnl = max(pnl_raw * entry_lev * entry_rr, -entry_rr)
     hold_bars = state["current_bar"] - state["entry_bar"]
     capital_before = state["capital"]
     state["capital"] *= (1 + pnl)
@@ -1005,6 +1012,10 @@ def main():
         log.error(f"[ML 필터] 로드 실패 — 실거래 중단: {ml_model_dir}  오류: {_ml_e}")
         raise
     log.info(f"[ML 필터] 앙상블 로드 완료: {ml_model_dir}  theta={ml_ensemble.threshold:.3f}")
+    _ml_th = os.getenv("ML_THRESHOLD")
+    if _ml_th:
+        ml_ensemble.threshold = float(_ml_th)
+        log.info(f"[ML 필터] theta override (.env ML_THRESHOLD) → {ml_ensemble.threshold:.3f}")
 
     exchange, mode = build_exchange(trade_mode)
 

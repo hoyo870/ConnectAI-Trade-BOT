@@ -157,10 +157,12 @@ class AntifragileStrategy:
                 next_lvl   = (self.add_cnt + 1) * self.p["atr_add_step"]
                 if self.add_cnt < self.p["add_levels"] and favorable >= next_lvl:
                     add_rr        = self.p["rr_add"]
+                    # 수량가중 평균 진입가로 갱신 — 거래소(실거래) 실현손익 방식과 동일.
+                    # qty_j = capital*rr_j*lev/p_j 이므로 wavg = Σrr_j / Σ(rr_j/p_j).
+                    # (반드시 self.rr 증가 이전, 기존 rr 기준으로 계산)
+                    self.avg_entry = (self.rr + add_rr) / (self.rr / self.avg_entry + add_rr / price)
                     self.rr      += add_rr
                     self.add_cnt += 1
-                    # avg_entry는 최초 진입가 고정 (구형 run_antifragile_ml 동일 방식)
-                    # avg_entry 가중평균 업데이트 시 동일 exit에서 손실로 잘못 분류되는 문제 방지
                     tight = self.p["trail_atr_tight"]
                     if self.pos == 1: self.trail_sl = max(self.trail_sl, price - tight * atr)
                     else:             self.trail_sl = min(self.trail_sl, price + tight * atr)

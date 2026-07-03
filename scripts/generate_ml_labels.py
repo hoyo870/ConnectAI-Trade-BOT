@@ -26,7 +26,12 @@ from strategies.antifragile import AntifragileStrategy
 from models.af_ensemble.feature_extractor import (
     extract_snapshot, extract_sequence, SNAPSHOT_COLS,
 )
-from scripts.backtest_af_exact import build_ml_context_df
+# build_ml_context_df 는 backtest_af_exact 리팩터로 제거됨 → 엔진의 _build_ml_context 사용
+from strategies.backtest_engine import AntifragileBacktestRunner
+
+def build_ml_context_df(raw):
+    """ML 라벨용 컨텍스트 df (bb_sigma=0 트렌드 + 2σ BB + ML 피처). 백테스트 엔진과 동일 경로."""
+    return AntifragileBacktestRunner._build_ml_context(raw)
 
 
 def generate_labels_for_coin(

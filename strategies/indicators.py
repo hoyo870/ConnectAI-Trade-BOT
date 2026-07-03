@@ -21,17 +21,21 @@ def add_indicators_af(df: pd.DataFrame, bb_sigma: float = 0.5) -> pd.DataFrame:
     al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
     df["_rsi"] = 100 - 100 / (1 + ag / (al + 1e-9))
 
-    cl1h   = close.resample("1h").last().ffill()
+    cl1h   = close.resample("1h").last()
     ema_1h = cl1h.ewm(span=20, adjust=False).mean()
+    # look-ahead 제거 + 백테스트↔live 통일:
+    #   기존은 resample('1h').last() 가 현재 형성 중 1h봉에 그 시간대 미래 5m종가(:55)를 넣어
+    #   백테스트 trend에 미래참조가 있었다(live는 매 틱 그 시점까지만 봄).
+    #   완성된 1h봉 EMA/밴드(shift1)를 현재 5m 종가와 비교 → 인과적. bb_sigma=0에서 live의
+    #   봉단위 계산과 수학적으로 동치(현재종가가 EMA 양변 상쇄), 백테스트만 미래참조가 제거됨.
+    ema_c = ema_1h.shift(1).reindex(df.index, method="ffill")
     if bb_sigma > 0:
-        std_1h = cl1h.rolling(20).std()
-        bb_up  = ema_1h + bb_sigma * std_1h
-        bb_lo  = ema_1h - bb_sigma * std_1h
-        df["_trend_up"]   = (cl1h > bb_up).reindex(df.index, method="ffill").fillna(False).astype(int)
-        df["_trend_down"] = (cl1h < bb_lo).reindex(df.index, method="ffill").fillna(False).astype(int)
+        std_c = cl1h.rolling(20).std().shift(1).reindex(df.index, method="ffill")
+        df["_trend_up"]   = (close > ema_c + bb_sigma * std_c).fillna(False).astype(int)
+        df["_trend_down"] = (close < ema_c - bb_sigma * std_c).fillna(False).astype(int)
     else:
-        df["_trend_up"]   = (cl1h > ema_1h).reindex(df.index, method="ffill").fillna(False).astype(int)
-        df["_trend_down"] = (cl1h < ema_1h).reindex(df.index, method="ffill").fillna(False).astype(int)
+        df["_trend_up"]   = (close > ema_c).fillna(False).astype(int)
+        df["_trend_down"] = (close < ema_c).fillna(False).astype(int)
 
     return df
 

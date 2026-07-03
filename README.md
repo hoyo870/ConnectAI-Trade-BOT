@@ -1,5 +1,11 @@
 # ConnectAI Trade Bot
 
+> ⚠️ **[2026-06-24] 이 문서의 백테스트 수익 수치는 무효(과대계상)입니다.**
+> 피라미딩 수익률을 최초진입가 기준으로 계산하던 회계 버그로 손실 전략이 큰 수익으로 표시됐습니다.
+> 가중평균(거래소 실현손익) 기준 수정 시 예: BTC 2026 OOS가 +수익 → **−48.7%**.
+> 피라미딩은 구조적 손실로 비활성화(`add_levels=0`)했고 정직한 단일진입 재베이스라인 진행 중.
+> 상세: 메모리 `project_pnl_accounting_fix`, 계획 `~/.claude/plans/cosmic-leaping-goblet.md`.
+
 BTC/USDT · ETH/USDT · SOL/USDT · XRP/USDT 5분봉 암호화폐 선물 자동매매 봇.  
 **Antifragile 전략** (AdaptRSI + ATR trailing stop + AFEnsemble ML 필터) — 4종목 동시 운영.
 

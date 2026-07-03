@@ -46,6 +46,7 @@ from config.loader import load_coin_raw
 from strategies.indicators import add_indicators_af
 from strategies.backtest_engine import AntifragileBacktestRunner
 from config.af_params import DEFAULT_PARAMS, PRESETS as _PRESET_DEFS, get_preset
+from src.data_fetcher import fetch_ohlcv
 
 _DEFAULT_MODEL = str(ROOT / "models/af_ensemble/saved")
 _BB_SIGMA = 0  # live_trader.py와 동일: bb_sigma=0 (EMA 크로스, BB 미사용)
@@ -74,6 +75,46 @@ HIST_START = {
 }
 
 CHART_DIR = ROOT / "temp" / "charts"
+
+_SYMBOLS = {"btc": "BTC/USDT", "eth": "ETH/USDT", "sol": "SOL/USDT", "xrp": "XRP/USDT"}
+
+
+def _existing_max_ts(coin: str):
+    """data/raw의 해당 코인 CSV들에서 가장 최근 봉 timestamp(UTC) 조회. 없으면 None."""
+    sym = _SYMBOLS[coin].replace("/", "")
+    max_ts = None
+    for f in sorted((ROOT / "data/raw").glob(f"{sym}_5m_*.csv")):
+        try:
+            last = pd.read_csv(f, usecols=["timestamp"]).iloc[-1, 0]
+            ts = pd.Timestamp(last)
+            ts = ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
+        except Exception:
+            continue
+        if max_ts is None or ts > max_ts:
+            max_ts = ts
+    return max_ts
+
+
+def ensure_data_coverage(coin: str, start: str, end) -> None:
+    """요청 기간(end)이 보유 데이터보다 최신이면 Binance에서 부족분을 자동 다운로드."""
+    end_ts   = pd.Timestamp(end, tz="UTC") if end else pd.Timestamp.now(tz="UTC")
+    have_max = _existing_max_ts(coin)
+    # 완성봉 기준 한 봉(5분) 여유: 보유 최신봉이 요청 end-1봉 이상이면 갱신 불필요
+    if have_max is not None and have_max >= end_ts - pd.Timedelta(minutes=5):
+        return
+    fetch_start = have_max if have_max is not None else pd.Timestamp(start, tz="UTC")
+    fetch_start_str = fetch_start.strftime("%Y-%m-%d %H:%M:%S")
+    # data_fetcher._parse_dt는 'YYYY-MM-DD' 또는 'YYYY-MM-DD HH:MM:SS'만 허용 → 초 포함으로 정규화
+    end_str = end_ts.strftime("%Y-%m-%d %H:%M:%S") if end else None
+    print(f"  ⏬ [{coin.upper()}] 데이터 부족 (보유 최신={have_max} < 요청 {end_ts}) "
+          f"→ 자동 갱신: {fetch_start_str} ~ {end_str or 'now'}")
+    fetch_ohlcv(symbol=_SYMBOLS[coin], timeframe="5m", start_date=fetch_start_str, end_date=end_str)
+
+
+def _load(runner, coin: str, start: str, end):
+    """ensure_data_coverage(자동 갱신) 후 runner.load_coin 호출하는 래퍼."""
+    ensure_data_coverage(coin, start, end)
+    return runner.load_coin(coin, start=start, end=end)
 
 
 def _save_charts(label: str, mode: str, df: pd.DataFrame,
@@ -213,7 +254,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="live_trader 완벽 모방 백테스트 (ML 필수)")
     parser.add_argument("--coin",        default="all", choices=["btc", "eth", "sol", "xrp", "all"])
-    parser.add_argument("--mode",        default="2026", choices=["2026", "hist", "jun0814", "jun1522", "jun"])
+    parser.add_argument("--mode",        default="2026", choices=["2026", "hist", "jun0814", "jun1522", "jun", "daily"])
     parser.add_argument("--windows",     type=int, default=10)
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--window-days", type=int, default=91)
@@ -221,9 +262,9 @@ def main():
                         help=f"AFEnsemble 저장 디렉터리 (기본: .env ML_MODEL_DIR 또는 {_DEFAULT_MODEL})")
     parser.add_argument("--leverage",    type=int, default=_env_lev,
                         help=f"레버리지 (기본: .env LEVERAGE 또는 7)")
-    parser.add_argument("--hide-details", action="store_true", default=True,
+    parser.add_argument("--hide-details", action="store_true", default=False,
                         help="거래 상세 로그 출력 생략 (Jun 18~19, Jun 20~22, Jun 모드에서만 적용)")
-    parser.add_argument("--skip-charts", action="store_true", default=True,
+    parser.add_argument("--skip-charts", action="store_true", default=False,
                         help="차트 저장 생략 (Jun 18~19, Jun 20~22, Jun 모드에서만 적용)")
     args = parser.parse_args()
 
@@ -236,6 +277,10 @@ def main():
     af_params["leverage"] = args.leverage  # LEVERAGE는 프리셋보다 우선
 
     runner = AntifragileBacktestRunner.from_saved(args.model, params=af_params)
+    # live_trader.py와 동일: .env ML_THRESHOLD 로 ensemble threshold 오버라이드 (후보 θ=0.45 반영)
+    _ml_th = os.getenv("ML_THRESHOLD")
+    if _ml_th:
+        runner.ensemble.threshold = float(_ml_th)
     print(f"[ML 필터] 로드 완료: {args.model}  theta={runner.ensemble.threshold:.3f}")
     print(f"[설정]    LEVERAGE={args.leverage}  AF_PARAM_PRESET={preset_name or 'prod(기본)'}  (.env LEVERAGE: {os.getenv('LEVERAGE', '미설정')})")
 
@@ -250,7 +295,7 @@ def main():
         print(f"{'█'*66}")
 
         if args.mode == "2026":
-            df, df_ml = runner.load_coin(coin, start="2026-01-01", end="2026-06-01")
+            df, df_ml = _load(runner, coin, start="2026-01-01", end="2026-06-01")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).days
@@ -267,7 +312,7 @@ def main():
                                        window_days=args.window_days, hist_start=hs)
 
         elif args.mode == "jun0814":
-            df, df_ml = runner.load_coin(coin, start="2026-06-08 00:00", end="2026-06-14 23:59")
+            df, df_ml = _load(runner, coin, start="2026-06-08 00:00", end="2026-06-14 23:59")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).total_seconds() / 86400
@@ -284,7 +329,7 @@ def main():
                 _save_charts(label, "jun0814", df, res)
 
         elif args.mode == "jun1522":
-            df, df_ml = runner.load_coin(coin, start="2026-06-15 00:00", end="2026-06-22 23:59")
+            df, df_ml = _load(runner, coin, start="2026-06-15 00:00", end="2026-06-22 23:59")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).total_seconds() / 86400
@@ -301,7 +346,7 @@ def main():
                 _save_charts(label, "jun1522", df, res)
 
         elif args.mode == "jun":
-            df, df_ml = runner.load_coin(coin, start="2026-06-01 00:00", end="2026-06-22 17:00")
+            df, df_ml = _load(runner, coin, start="2026-06-01 00:00", end="2026-06-22 17:00")
             if len(df) < 50:
                 print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
             days = (df.index[-1] - df.index[0]).total_seconds() / 86400
@@ -316,6 +361,23 @@ def main():
                     print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
             if not args.skip_charts:
                 _save_charts(label, "jun", df, res)
+
+        elif args.mode == "daily":
+            df, df_ml = _load(runner, coin, start="2026-06-23 07:20", end="2026-06-24 02:00")
+            if len(df) < 50:
+                print(f"  ⚠️ 데이터 부족 ({len(df)}봉)"); continue
+            days = (df.index[-1] - df.index[0]).total_seconds() / 86400
+            print(f"\n[{label}] daily 실거래 기간")
+            res = runner.run(df, df_ml)
+            runner.print_result(f"{label} daily", res, days)
+            if args.hide_details:
+                print(f"\n  상세 거래:")
+                for t in res["trade_log"]:
+                    dr   = "롱" if t["direction"] == 1 else "숏"
+                    flip = " ◀FLIP" if t.get("reason") == "reverse_flip" else ""
+                    print(f"    {dr}  pnl={t['pnl']*100:+.3f}%  {t.get('reason','')}{flip}")
+            if args.skip_charts:
+                _save_charts(label, "daily", df, res)
 
 
 if __name__ == "__main__":
