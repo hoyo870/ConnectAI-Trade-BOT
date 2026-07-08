@@ -72,5 +72,13 @@ def load_coin_raw(coin: str) -> pd.DataFrame:
     all_df = pd.concat(pieces).sort_index()
     all_df = all_df[~all_df.index.duplicated(keep="last")]
     all_df = all_df[all_df["close"].notna() & (all_df["close"] > 0)]
+
+    # AF_TIMEFRAME 리샘플: 5m 원본 → 상위 TF (미설정=5m이면 그대로).
+    from config.af_params import BASE_TF, TF_MINUTES
+    if BASE_TF != "5m":
+        all_df = all_df.resample(f"{TF_MINUTES}min", label="right", closed="right").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna(subset=["close"])
+
     print(f"  {all_df.index[0].date()} ~ {all_df.index[-1].date()}  ({len(all_df):,}행)")
     return all_df

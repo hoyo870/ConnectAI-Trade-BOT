@@ -21,7 +21,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import numpy as np
 import pandas as pd
 
-from config.af_params import FEE_TOTAL, DEFAULT_PARAMS, EMERGENCY_SL_ATR, FUNDING_RATE_8H
+from config.af_params import FEE_TOTAL, DEFAULT_PARAMS, EMERGENCY_SL_ATR, FUNDING_RATE_8H, FUNDING_BARS_8H
 from config.loader import load_coin_raw
 from models.af_ensemble.ensemble import AFEnsemble
 from models.af_ensemble.feature_extractor import add_ml_features
@@ -34,10 +34,10 @@ _BB_SIGMA = 0  # live_trader.py와 동일: bb_sigma=0 (EMA 크로스, BB 미사�
 def _net_pnl(pnl_raw: float, rr: float, hold_bars: int, lev: float,
              cost_mult: float = 1.0) -> float:
     """비용 차감 후 자본 수익률.
-    비용 = 왕복 수수료+슬리피지(2×FEE_TOTAL, 진입+청산) + 보유 funding(96봉=8h당 FUNDING_RATE_8H).
+    비용 = 왕복 수수료+슬리피지(2×FEE_TOTAL, 진입+청산) + 보유 funding(FUNDING_BARS_8H봉=8h당 FUNDING_RATE_8H).
     cost_mult: 비용 민감도 배수(1=기본, 2/3=보수적 스트레스). 손실은 -rr로 캡(청산)."""
     fee   = 2 * FEE_TOTAL
-    fund  = (hold_bars / 96.0) * FUNDING_RATE_8H
+    fund  = (hold_bars / FUNDING_BARS_8H) * FUNDING_RATE_8H
     gross = pnl_raw - (fee + fund) * cost_mult
     return max(gross * lev * rr, -rr)
 

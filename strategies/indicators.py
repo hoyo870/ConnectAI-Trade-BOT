@@ -3,6 +3,8 @@ strategies/indicators.py — BB σ 기반 ATR/RSI/트렌드 지표 계산 단일
 """
 import pandas as pd
 
+from config.af_params import TREND_RULE
+
 
 def add_indicators_af(df: pd.DataFrame, bb_sigma: float = 0.5) -> pd.DataFrame:
     """ATR/RSI/1h 트렌드를 df에 추가. 컬럼: _atr, _rsi, _trend_up, _trend_down."""
@@ -21,7 +23,7 @@ def add_indicators_af(df: pd.DataFrame, bb_sigma: float = 0.5) -> pd.DataFrame:
     al = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
     df["_rsi"] = 100 - 100 / (1 + ag / (al + 1e-9))
 
-    cl1h   = close.resample("1h").last()
+    cl1h   = close.resample(TREND_RULE).last()   # 5m→1h, 60m→12h (12× base TF)
     ema_1h = cl1h.ewm(span=20, adjust=False).mean()
     # look-ahead 제거 + 백테스트↔live 통일:
     #   기존은 resample('1h').last() 가 현재 형성 중 1h봉에 그 시간대 미래 5m종가(:55)를 넣어

@@ -3,6 +3,16 @@ Antifragile 전략 공통 파라미터/프리셋 — 단일 소스
 strategies/backtest_engine.py + live_tools/live_trader.py 공유.
 프리셋 변경 시 이 파일만 수정하면 됨.
 """
+import os
+
+# ── 타임프레임 (AF_TIMEFRAME 미설정 시 5m = 기존 동작 불변) ──────────────────
+# 5m 기준 상수를 TF에 비례 스케일. TREND_RULE=12×base(5m→1h, 60m→12h),
+# FUNDING_BARS_8H=8h/base(5m→96, 60m→8). load_coin_raw가 이 TF로 리샘플.
+_TF_MIN = {"5m": 5, "15m": 15, "30m": 30, "60m": 60, "1h": 60}
+BASE_TF         = os.getenv("AF_TIMEFRAME", "5m")
+TF_MINUTES      = _TF_MIN.get(BASE_TF, 5)
+TREND_RULE      = f"{TF_MINUTES * 12}min"   # 5m→60min(=1h), 60m→720min(=12h)
+FUNDING_BARS_8H = int(480 / TF_MINUTES)     # 5m→96, 60m→8
 
 # ── 수수료 상수 ──────────────────────────────────────────────────────────────
 TRADING_FEE = 0.00055   # Bybit taker 실측 0.055% (per side)
